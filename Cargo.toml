@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/strangetimer",
+    "crates/strangetimer-daemon",
+    "crates/strangetimer-core",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+crossterm = "0.28"
+rodio = "0.20"
+open = "5"
+dirs = "5"
+interprocess = "2"
+anyhow = "1"

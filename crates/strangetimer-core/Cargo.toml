@@ -1,0 +1,12 @@
+[package]
+name = "strangetimer-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_derive = "1"
+serde_json = { workspace = true }
+dirs = { workspace = true }
+anyhow = { workspace = true }

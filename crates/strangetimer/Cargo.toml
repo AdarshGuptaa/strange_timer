@@ -1,0 +1,16 @@
+[package]
+name = "strangetimer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+crossterm = { workspace = true }
+rodio = { workspace = true }
+open = { workspace = true }
+dirs = { workspace = true }
+interprocess = { workspace = true }

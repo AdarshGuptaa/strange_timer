@@ -1,0 +1,18 @@
+[package]
+name = "strangetimer-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+strangetimer-core = { path = "../strangetimer-core" }
+clap = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+crossterm = { workspace = true }
+rodio = { workspace = true }
+open = { workspace = true }
+dirs = { workspace = true }
+interprocess = { workspace = true, features = ["tokio"] }
+anyhow = { workspace = true }
