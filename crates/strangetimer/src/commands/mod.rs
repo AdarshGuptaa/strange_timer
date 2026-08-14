@@ -27,7 +27,7 @@ pub fn connect() -> Result<interprocess::local_socket::Stream> {
         let name = socket_name()
             .to_fs_name::<GenericFilePath>()
             .with_context(|| format!("invalid socket name: {}", socket_name()))?;
-        Stream::connect(name).with_context(|| daemon_hint())
+        Stream::connect(name).with_context(daemon_hint)
     }
     #[cfg(windows)]
     {
@@ -36,7 +36,7 @@ pub fn connect() -> Result<interprocess::local_socket::Stream> {
         let name = socket_name()
             .to_ns_name::<GenericNamespaced>()
             .with_context(|| format!("invalid pipe name: {}", socket_name()))?;
-        Stream::connect(name).with_context(|| daemon_hint())
+        Stream::connect(name).with_context(daemon_hint)
     }
 }
 

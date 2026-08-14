@@ -49,7 +49,7 @@ pub fn parse_offset(s: &str) -> Result<Duration, String> {
         let part = unit_to_duration(n, unit).map_err(|e| {
             format!("unrecognised unit {:?} in {:?}: {}", unit, s, e)
         })?;
-        total = total + part;
+        total += part;
     }
 
     Ok(total)

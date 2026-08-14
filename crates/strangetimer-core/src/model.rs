@@ -3,20 +3,20 @@ use std::path::PathBuf;
 use chrono::{DateTime, Duration, Local};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Timer {
     pub name: String,
     pub buzzers: Vec<BuzzerRef>,
     pub created_at: DateTime<Local>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuzzerRef {
     pub offset: Duration,
     pub buzzer_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Buzzer {
     pub name: String,
     pub actions: Vec<BuzzerAction>,
@@ -25,7 +25,7 @@ pub struct Buzzer {
     pub builtin: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BuzzerAction {
     DefaultAudio,
     DefaultVideo,
@@ -43,7 +43,7 @@ pub enum BuzzerAction {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LlmPromptSource {
     Inline(String),
     File(PathBuf),

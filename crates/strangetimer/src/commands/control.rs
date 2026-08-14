@@ -104,7 +104,7 @@ fn parse_schedule_time(s: &str) -> Result<DateTime<Local>> {
         .ok_or_else(|| anyhow!("cannot resolve local time {s:?}"))?;
 
     if dt <= Local::now() {
-        dt = dt + chrono::Duration::days(1);
+        dt += chrono::Duration::days(1);
     }
     Ok(dt)
 }

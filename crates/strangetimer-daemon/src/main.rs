@@ -441,3 +441,22 @@ async fn shutdown_signal() {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
+
+#[cfg(test)]
+mod test_util {
+    use std::sync::Once;
+
+    /// Point `STRANGETIMER_DATA_DIR` at one process-unique temp directory,
+    /// shared by every test module so they never race each other.
+    static ONCE: Once = Once::new();
+
+    pub fn init() {
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir()
+                .join(format!("strangetimer-daemon-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("STRANGETIMER_DATA_DIR", &dir);
+        });
+    }
+}

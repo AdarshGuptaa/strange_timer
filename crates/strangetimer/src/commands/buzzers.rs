@@ -49,7 +49,7 @@ pub fn view_buzzers() -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<32} {}", "Name", "Type(s)", "Built-in");
+    println!("{:<24} {:<32} Built-in", "Name", "Type(s)");
     println!("{}", "─".repeat(78));
     for buzzer in &buzzers {
         let kinds = buzzer

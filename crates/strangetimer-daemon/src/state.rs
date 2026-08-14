@@ -280,7 +280,7 @@ impl AppState {
 
         if let Some(paused_at) = run.paused_at {
             let pause_duration = Local::now() - paused_at;
-            run.elapsed_before_pause = run.elapsed_before_pause + pause_duration;
+            run.elapsed_before_pause += pause_duration;
         }
 
         run.status = TimerStatus::Running;
@@ -325,5 +325,184 @@ impl AppState {
     pub async fn set_close_windows_confirmed(&self) {
         let mut inner = self.inner.lock().await;
         inner.close_windows_confirmed = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strangetimer_core::model::{BuzzerAction, BuzzerRef, RepeatMode, TimerStatus};
+
+    fn fresh_state() -> AppState {
+        crate::test_util::init();
+        AppState::new(Vec::new(), Vec::new(), DaemonState::default())
+    }
+
+    fn timer(name: &str) -> Timer {
+        Timer {
+            name: name.to_string(),
+            buzzers: vec![],
+            created_at: Local::now(),
+        }
+    }
+
+    fn buzzer(name: &str, builtin: bool) -> Buzzer {
+        Buzzer {
+            name: name.to_string(),
+            actions: vec![BuzzerAction::DefaultAudio],
+            builtin,
+        }
+    }
+
+    #[tokio::test]
+    async fn add_and_get_timer() {
+        let s = fresh_state();
+        s.add_timer(timer("workAndFun")).await.unwrap();
+        assert_eq!(s.get_timer("workAndFun").await.unwrap().name, "workAndFun");
+        assert!(s.get_timer("nope").await.is_none());
+        assert_eq!(s.get_timers().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_timer_refuses_duplicates() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        assert!(s.add_timer(timer("t")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn remove_timer_refused_while_run_active() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+        assert!(s.remove_timer("t").await.is_err());
+        s.remove_run("t").await.unwrap();
+        s.remove_timer("t").await.unwrap();
+        assert!(s.get_timer("t").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_timer_default_and_suffix_names() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        let n1 = s.duplicate_timer("t", None).await.unwrap();
+        assert_eq!(n1, "t_copy");
+        let n2 = s.duplicate_timer("t", None).await.unwrap();
+        assert_eq!(n2, "t_copy_2");
+        let n3 = s.duplicate_timer("t", Some("custom".to_string())).await.unwrap();
+        assert_eq!(n3, "custom");
+        assert!(s.duplicate_timer("missing", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn buzzer_guards() {
+        let s = fresh_state();
+        s.add_buzzer(buzzer("builtin_a", true)).await.unwrap();
+        s.add_buzzer(buzzer("custom_b", false)).await.unwrap();
+
+        // Duplicate names refused (built-in or not).
+        assert!(s.add_buzzer(buzzer("builtin_a", false)).await.is_err());
+        assert!(s.add_buzzer(buzzer("custom_b", false)).await.is_err());
+
+        // Built-ins cannot be deleted.
+        assert!(s.remove_buzzer("builtin_a").await.is_err());
+
+        // Buzzers referenced by a timer cannot be deleted.
+        let mut t = timer("uses_b");
+        t.buzzers.push(BuzzerRef {
+            offset: Duration::minutes(1),
+            buzzer_name: "custom_b".to_string(),
+        });
+        s.add_timer(t).await.unwrap();
+        assert!(s.remove_buzzer("custom_b").await.is_err());
+
+        // Free buzzers can be deleted.
+        s.add_buzzer(buzzer("freebie", false)).await.unwrap();
+        s.remove_buzzer("freebie").await.unwrap();
+        assert!(s.get_buzzer("freebie").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_run_immediate_and_scheduled() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+
+        let run = s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+        assert_eq!(run.status, TimerStatus::Running);
+        assert_eq!(run.current_rep, 0);
+        assert!(run.fired_indices.is_empty());
+
+        let future = Local::now() + Duration::hours(1);
+        let run = s
+            .start_run("t", RepeatMode::Infinite, Some(future))
+            .await
+            .unwrap();
+        assert_eq!(run.status, TimerStatus::Scheduled);
+        assert_eq!(run.schedule_time, Some(future));
+        assert_eq!(s.lock().await.state.runs.len(), 1);
+
+        assert!(s.start_run("missing", RepeatMode::Count(1), None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn start_run_replaces_existing_run() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+        s.start_run("t", RepeatMode::Count(5), None).await.unwrap();
+        let runs = s.lock().await.state.runs.clone();
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0].repetitions, RepeatMode::Count(5)));
+    }
+
+    #[tokio::test]
+    async fn pause_resume_accounts_elapsed() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+
+        s.pause_run("t").await.unwrap();
+        let paused = s.get_run("t").await.unwrap();
+        assert_eq!(paused.status, TimerStatus::Paused);
+        assert!(paused.paused_at.is_some());
+
+        // Double pause is an error.
+        assert!(s.pause_run("t").await.is_err());
+
+        // Resume adds the pause duration to elapsed_before_pause.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        s.resume_run("t").await.unwrap();
+        let resumed = s.get_run("t").await.unwrap();
+        assert_eq!(resumed.status, TimerStatus::Running);
+        assert!(resumed.paused_at.is_none());
+        assert!(resumed.elapsed_before_pause >= Duration::seconds(1));
+
+        // Resuming a running run is an error.
+        assert!(s.resume_run("t").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pause_all_and_stop_all() {
+        let s = fresh_state();
+        s.add_timer(timer("a")).await.unwrap();
+        s.add_timer(timer("b")).await.unwrap();
+        s.start_run("a", RepeatMode::Count(1), None).await.unwrap();
+        s.start_run("b", RepeatMode::Count(1), None).await.unwrap();
+
+        s.pause_all().await.unwrap();
+        for run in s.lock().await.state.runs.clone() {
+            assert_eq!(run.status, TimerStatus::Paused);
+        }
+
+        s.stop_all().await.unwrap();
+        assert!(s.lock().await.state.runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_windows_confirmation_flag() {
+        let s = fresh_state();
+        assert!(!s.is_close_windows_confirmed().await);
+        s.set_close_windows_confirmed().await;
+        assert!(s.is_close_windows_confirmed().await);
     }
 }

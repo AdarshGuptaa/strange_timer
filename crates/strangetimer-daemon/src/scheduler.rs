@@ -117,3 +117,167 @@ pub async fn tick(state: Arc<AppState>) -> Vec<String> {
 
     fired_this_tick
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use std::sync::Arc;
+
+    use chrono::Duration;
+    use strangetimer_core::model::{
+        BuzzerRef, DaemonState, RepeatMode, Timer, TimerRun, TimerStatus,
+    };
+
+    fn state_with(timers: Vec<Timer>, runs: Vec<TimerRun>) -> Arc<AppState> {
+        crate::test_util::init();
+        Arc::new(AppState::new(
+            timers,
+            Vec::new(),
+            DaemonState {
+                runs,
+                registered: true,
+                last_saved_at: None,
+            },
+        ))
+    }
+
+    fn timer_with_offsets(name: &str, offsets_secs: &[i64]) -> Timer {
+        Timer {
+            name: name.to_string(),
+            buzzers: offsets_secs
+                .iter()
+                .map(|s| BuzzerRef {
+                    offset: Duration::seconds(*s),
+                    buzzer_name: "buzz".to_string(),
+                })
+                .collect(),
+            created_at: Local::now(),
+        }
+    }
+
+    fn run(name: &str, status: TimerStatus, started_secs_ago: i64, rep: u32, fired: &[usize]) -> TimerRun {
+        TimerRun {
+            timer_name: name.to_string(),
+            started_at: Local::now() - Duration::seconds(started_secs_ago),
+            repetitions: strangetimer_core::model::RepeatMode::Count(1),
+            current_rep: rep,
+            schedule_time: None,
+            status,
+            paused_at: None,
+            elapsed_before_pause: Duration::zero(),
+            fired_indices: fired.to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fires_due_buzzers_only() {
+        // 5s buzzer is due (run started 10s ago), 30s buzzer is not.
+        let s = state_with(
+            vec![timer_with_offsets("t", &[5, 30])],
+            vec![run("t", TimerStatus::Running, 10, 0, &[])],
+        );
+        let fired = tick(Arc::clone(&s)).await;
+        assert_eq!(fired, vec!["buzz"]);
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.fired_indices, vec![0]);
+        assert_eq!(run.status, TimerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn completes_run_when_all_fired_and_count_done() {
+        let s = state_with(
+            vec![timer_with_offsets("t", &[5])],
+            vec![run("t", TimerStatus::Running, 10, 0, &[])],
+        );
+        let fired = tick(Arc::clone(&s)).await;
+        assert_eq!(fired, vec!["buzz"]);
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.status, TimerStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn advances_to_next_repetition_for_count() {
+        let mut run = run("t", TimerStatus::Running, 10, 0, &[]);
+        run.repetitions = RepeatMode::Count(2);
+        let s = state_with(vec![timer_with_offsets("t", &[5])], vec![run]);
+        // Rep 0 fires and advances to rep 1.
+        tick(Arc::clone(&s)).await;
+        let mut run = s.get_run("t").await.unwrap();
+        assert_eq!(run.current_rep, 1);
+        assert_eq!(run.status, TimerStatus::Running);
+        assert!(run.fired_indices.is_empty());
+
+        // Push rep 1's clock into the past and tick again → completed.
+        run.started_at = Local::now() - Duration::seconds(10);
+        s.update_state(|st| {
+            st.runs[0] = run.clone();
+        })
+        .await
+        .unwrap();
+        tick(Arc::clone(&s)).await;
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.status, TimerStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn infinite_repetitions_never_complete() {
+        let mut run = run("t", TimerStatus::Running, 10, 0, &[]);
+        run.repetitions = RepeatMode::Infinite;
+        let s = state_with(vec![timer_with_offsets("t", &[5])], vec![run]);
+        tick(Arc::clone(&s)).await;
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.current_rep, 1);
+        assert_eq!(run.status, TimerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn skips_paused_runs() {
+        let s = state_with(
+            vec![timer_with_offsets("t", &[5])],
+            vec![run("t", TimerStatus::Paused, 10, 0, &[])],
+        );
+        let fired = tick(Arc::clone(&s)).await;
+        assert!(fired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduled_run_starts_when_time_passes() {
+        let s = state_with(vec![timer_with_offsets("t", &[5])], vec![]);
+
+        // Not yet due.
+        let future_run = {
+            let mut r = run("t", TimerStatus::Scheduled, 0, 0, &[]);
+            r.schedule_time = Some(Local::now() + Duration::hours(1));
+            r
+        };
+        s.update_state(|st| st.runs.push(future_run)).await.unwrap();
+        tick(Arc::clone(&s)).await;
+        assert_eq!(s.get_run("t").await.unwrap().status, TimerStatus::Scheduled);
+
+        // Now due: flips to Running in the same tick.
+        s.update_state(|st| {
+            st.runs[0].schedule_time = Some(Local::now() - Duration::seconds(1));
+        })
+        .await
+        .unwrap();
+        tick(Arc::clone(&s)).await;
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.status, TimerStatus::Running);
+        // Offsets count from the scheduled start, so nothing fires yet.
+        assert!(run.fired_indices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fires_all_due_buzzers_in_one_pass() {
+        // Run started 10s ago: the 5s and 8s buzzers are due, 30s is not.
+        let s = state_with(
+            vec![timer_with_offsets("t", &[5, 8, 30])],
+            vec![run("t", TimerStatus::Running, 10, 0, &[])],
+        );
+        let fired = tick(Arc::clone(&s)).await;
+        assert_eq!(fired, vec!["buzz", "buzz"]);
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.fired_indices, vec![0, 1]);
+    }
+}
