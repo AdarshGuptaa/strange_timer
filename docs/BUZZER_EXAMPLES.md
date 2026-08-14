@@ -66,6 +66,26 @@ strangetimer create buzzer dayEnd \
 When `dayEnd` fires, the chime plays, the project page opens, and Notes is
 brought to the front — in that order.
 
+## Stacking different buzzer types on one timer
+
+Offsets are **absolute** from the moment the run starts. Equal offsets fire
+at the same time; different offsets chain in sequence:
+
+```sh
+strangetimer create buzzer audioBeep --audio
+strangetimer create buzzer videoBreak --video
+strangetimer create buzzer pay --url https://bank.example.com
+
+# Audio at 30s, video at 1m, URL at 1m30s:
+strangetimer create timer t1   30s audioBeep   1m videoBreak   1m30s pay
+
+# Three buzzers that all ring together at 30s:
+strangetimer create timer t2 30s audioBeep 30s videoBreak 30s pay
+```
+
+Unknown buzzer names are rejected when the timer is created. To watch the
+ringing as it happens, run `strangetimer watch` in another terminal.
+
 ## A worked timer
 
 A 25-minute focus block with a chime at the end and a video at 30 minutes:
@@ -77,6 +97,7 @@ strangetimer create buzzer breakOver --video
 strangetimer create timer focusBlock 25min focusDone 30min breakOver
 strangetimer run focusBlock -n 4     # four rounds
 strangetimer view timers             # watch the progress bars
+strangetimer watch                   # see every ringing notification
 ```
 
 The offset grammar (`25min`, `30min`, `45min`, `1h`, `1D`, `1W`, …) is

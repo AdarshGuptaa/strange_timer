@@ -4,12 +4,13 @@
 //! Run with `cargo test --workspace` (builds every binary first).
 
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// Unique per-test data directory + socket, so tests can run in parallel.
+#[derive(Clone)]
 struct TestEnv {
     dir: PathBuf,
     socket: PathBuf,
@@ -636,6 +637,225 @@ fn multiple_pending_interrupts_are_independent() {
     expect_success(&guard, &["resume", "b"]);
 }
 
+/// `run -u` captures the terminal window id through xdotool and the daemon
+/// activates it (via wmctrl) when the buzzer fires — all through the
+/// recording seams, no real window touched.
+#[test]
+fn user_interrupt_captures_and_focuses_terminal() {
+    let env = TestEnv::new("focus-capture");
+    let wmctrl_log = env.dir.join("wmctrl.log");
+    let wmctrl = recording_script(&wmctrl_log, "");
+    let xdotool = {
+        let path = env.dir.join("fake-xdotool.sh");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               getactivewindow) echo 0x1234abcd ;;\n\
+               getwindowname) echo TestTerminal ;;\n\
+               *) exit 1 ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    };
+
+    let guard = DaemonGuard::start_with(
+        env,
+        &[
+            ("STRANGETIMER_TEST_WMCTRL", wmctrl.to_str().unwrap()),
+            ("STRANGETIMER_TEST_XDOTOOL", xdotool.to_str().unwrap()),
+        ],
+    );
+
+    expect_success(&guard, &["create", "timer", "t", "1s"]);
+    // The CLI captures the window through the same xdotool seam. Simulate
+    // an X11 session (this dev machine may itself be Wayland).
+    std::env::set_var("STRANGETIMER_TEST_XDOTOOL", &xdotool);
+    std::env::remove_var("XDG_SESSION_TYPE");
+    expect_success(&guard, &["run", "t", "-u"]);
+
+    // After the buzzer fires (and pauses the run), the daemon activates
+    // the captured window id through wmctrl.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let log = fs::read_to_string(&wmctrl_log).unwrap_or_default();
+        if log.contains("0x1234abcd") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&wmctrl_log).unwrap_or_default();
+    assert!(
+        log.contains("0x1234abcd"),
+        "daemon must activate the captured window id:\n{log}"
+    );
+
+    expect_success(&guard, &["resume", "t"]);
+}
+
+/// On Wayland, focus is reported unsupported instead of pretending — the
+/// buzzer still pauses the run.
+#[test]
+fn user_interrupt_skips_focus_on_wayland() {
+    let env = TestEnv::new("focus-wayland");
+    let wmctrl_log = env.dir.join("wmctrl.log");
+    let wmctrl = recording_script(&wmctrl_log, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_WMCTRL", wmctrl.to_str().unwrap())],
+    );
+
+    expect_success(&guard, &["create", "timer", "t", "1s"]);
+    // Simulate a Wayland session for the capturing CLI.
+    std::env::set_var("XDG_SESSION_TYPE", "wayland");
+    expect_success(&guard, &["run", "t", "-u"]);
+    std::env::remove_var("XDG_SESSION_TYPE");
+
+    // The buzzer still fires and pauses the run...
+    std::thread::sleep(Duration::from_secs(4));
+    let out = expect_success(&guard, &["view", "timers"]);
+    assert!(out.contains("PENDING"), "{out}");
+
+    // ...but no focus command is issued.
+    let log = fs::read_to_string(&wmctrl_log).unwrap_or_default();
+    assert!(log.is_empty(), "no focus commands on Wayland:\n{log}");
+
+    expect_success(&guard, &["resume", "t"]);
+}
+
+/// `strangetimer watch` prints a ringing line per fired buzzer, including
+/// the resume hint for user-interrupt runs.
+#[test]
+fn watch_prints_ringing_notifications() {
+    let guard = DaemonGuard::start(TestEnv::new("watch-notify"));
+    expect_success(&guard, &["create", "timer", "t", "1s"]);
+    expect_success(&guard, &["run", "t"]);
+
+    // Spawn the watcher with a captured stdout pipe.
+    let mut watcher = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
+        .env("STRANGETIMER_SOCKET", &guard.env.socket)
+        .args(["watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn watcher");
+    let stdout = watcher.stdout.take().unwrap();
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut buf = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let _ = reader.read_line(&mut buf);
+        if buf.contains("ringing") && buf.contains("t") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no ringing notification within 10s:\n{buf}"
+        );
+    }
+    assert!(buf.contains("ringing"), "{buf}");
+    assert!(
+        !buf.contains("resume"),
+        "non-interrupt runs get no resume hint:\n{buf}"
+    );
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+
+    // User-interrupt run: the watch prints the resume hint.
+    expect_success(&guard, &["create", "timer", "u", "1s"]);
+    expect_success(&guard, &["run", "u", "-u"]);
+    let mut watcher = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
+        .env("STRANGETIMER_SOCKET", &guard.env.socket)
+        .args(["watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn watcher");
+    let stdout = watcher.stdout.take().unwrap();
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut buf = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let _ = reader.read_line(&mut buf);
+        if buf.contains("ringing") && buf.contains("resume u") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no resume hint within 10s:\n{buf}"
+        );
+    }
+    assert!(buf.contains("resume u"), "{buf}");
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+
+    expect_success(&guard, &["resume", "u"]);
+}
+
+/// A repeated timer that stays down for several full periods catches up:
+/// on restart every missed repetition fires, not just the current one.
+#[test]
+fn recovery_catches_up_multiple_missed_repetitions() {
+    let mut guard = DaemonGuard::start_with(TestEnv::new("recovery-repeat"), &[]);
+    expect_success(&guard, &["create", "timer", "v", "1s", "default_video"]);
+
+    // Set the mock opener now — the daemon must be restarted with it.
+    let env2 = guard.env.clone();
+    let opens = env2.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let log = guard.log.clone();
+
+    expect_success(&guard, &["run", "v", "-n", "3"]);
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Crash the daemon before the first fire and stay down for 5s
+    // (~5 repetitions of a 1s timer).
+    guard.child.kill().unwrap();
+    guard.child.wait().unwrap();
+    std::thread::sleep(Duration::from_secs(5));
+
+    // Restart with the recording opener.
+    guard.child = Command::new(daemon_binary())
+        .env("STRANGETIMER_DATA_DIR", &env2.dir)
+        .env("STRANGETIMER_SOCKET", &env2.socket)
+        .env("STRANGETIMER_TEST_OPENER", &opener)
+        .stdout(Stdio::from(fs::File::create(&log).unwrap()))
+        .stderr(Stdio::from(fs::File::create(&log).unwrap()))
+        .spawn()
+        .expect("failed to respawn strangetimer-daemon");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&env2.socket).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon did not restart");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // All three missed video events fire on restart (Count(3), 1s each).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&opens)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+            >= 3
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&opens).unwrap_or_default();
+    assert_eq!(log.lines().count(), 3, "expected 3 catch-up opens:\n{log}");
+}
+
 /// The generated bash completion suggests buzzers after a completed offset
 /// in `create timer`, and state-aware names for `resume`.
 #[test]
@@ -652,10 +872,19 @@ fn bash_completion_suggests_buzzers_and_paused_timers() {
     let script = Command::new(cli_binary())
         .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
         .env("STRANGETIMER_SOCKET", &guard.env.socket)
-        .env("COMPLETE", "bash")
+        .args(["completions", "bash"])
         .output()
         .unwrap();
     assert!(script.status.success());
+    let script_text = String::from_utf8_lossy(&script.stdout).into_owned();
+    // The dynamic script must call `strangetimer` via PATH, never embed a
+    // build path (stale debug/release/CI paths break completion after
+    // moving or rebuilding binaries).
+    assert!(script_text.contains("COMPLETE="), "not a dynamic script");
+    assert!(
+        !script_text.contains("target/") && !script_text.contains("/home/runner"),
+        "script must not embed build paths:\n{script_text}"
+    );
 
     let run_bash = |words: &str, cword: usize, cur: &str| {
         let code = format!(
@@ -663,11 +892,20 @@ fn bash_completion_suggests_buzzers_and_paused_timers() {
              COMP_WORDS=({words}); COMP_CWORD={cword}; COMP_TYPE=63\n\
              _clap_complete_strangetimer '{cur}' '{cur}'\n\
              printf '%s\\n' \"${{COMPREPLY[*]}}\"",
-            script = String::from_utf8_lossy(&script.stdout),
+            script = script_text,
+        );
+        // The dynamic script resolves `strangetimer` via $PATH — put the
+        // test binary's directory first.
+        let bin_dir = cli_binary().parent().unwrap().to_path_buf();
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
         );
         let out = Command::new("bash")
             .arg("-c")
             .arg(&code)
+            .env("PATH", path)
             .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
             .env("STRANGETIMER_SOCKET", &guard.env.socket)
             .output()
@@ -851,6 +1089,67 @@ fn close_app_issues_pkill_for_named_app() {
     }
     let log = fs::read_to_string(&kills).unwrap_or_default();
     assert!(log.contains("fakebrowser"), "{log}");
+}
+
+/// Mixed buzzer types stack on one timer with absolute offsets; unknown
+/// buzzer names are rejected at creation time.
+#[test]
+fn buzzer_stacking_and_validation() {
+    let guard = DaemonGuard::start(TestEnv::new("stacking"));
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "myBuzzer",
+            "--audio",
+            "--url",
+            "https://example.com",
+        ],
+    );
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "timer",
+            "t1",
+            "30s",
+            "default_audio",
+            "1m",
+            "default_video",
+            "1m30s",
+            "myBuzzer",
+        ],
+    );
+
+    let out = expect_success(&guard, &["view", "t1"]);
+    assert!(
+        out.contains("default_audio"),
+        "missing first buzzer:\n{out}"
+    );
+    assert!(
+        out.contains("default_video"),
+        "missing second buzzer:\n{out}"
+    );
+    assert!(out.contains("myBuzzer"), "missing third buzzer:\n{out}");
+
+    // Unknown buzzer names are refused at creation, not at fire time.
+    let out = guard.cli(&["create", "timer", "bad", "5m", "no_such_buzzer"]);
+    assert!(!out.status.success(), "unknown buzzer must be rejected");
+    assert!(
+        stderr_text(&out).contains("no buzzer named"),
+        "{}",
+        stderr_text(&out)
+    );
+
+    // Names with control characters are refused too.
+    let out = guard.cli(&["create", "timer", "bad\nname", "5m"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_text(&out).contains("control characters"),
+        "{}",
+        stderr_text(&out)
+    );
 }
 
 /// `--focus-window` issues the platform focus command — verified through

@@ -3,13 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Local};
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::queue;
 use crossterm::style::Print;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{BuzzerRef, RepeatMode, Timer, TimerRun, TimerStatus};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -104,17 +102,38 @@ pub fn view_timer(name: &str, snapshot: bool) -> Result<()> {
     }
 
     if is_tty() && !snapshot {
-        let state = Arc::new((timer.clone(), active[0].clone()));
+        let timer_name = name.to_string();
+        let state: Arc<Mutex<Option<(Timer, TimerRun)>>> =
+            Arc::new(Mutex::new(Some((timer.clone(), active[0].clone()))));
         let render_state = Arc::clone(&state);
         let final_state = Arc::clone(&state);
         animate(
             move |frame| {
-                let (timer, run) = &*render_state;
+                {
+                    let mut guard = render_state.lock().expect("view cache lock");
+                    if frame % REFETCH_EVERY == 0 {
+                        // Keep the live block in sync with the daemon
+                        // (fires, pause/resume, completion).
+                        if let Ok(ServerMessage::TimerDetail { timer, runs, .. }) =
+                            send_and_receive(&ClientMessage::GetTimer {
+                                name: timer_name.clone(),
+                            })
+                        {
+                            if let Some(run) = runs
+                                .into_iter()
+                                .find(|r| r.status != TimerStatus::Completed)
+                            {
+                                *guard = Some((timer, run));
+                            }
+                        }
+                    }
+                }
+                let (timer, run) = guard_clone(&render_state);
                 let (width, height) = terminal_size();
                 let mut out = String::new();
                 out.push_str(&render_block(
-                    timer,
-                    run,
+                    &timer,
+                    &run,
                     Local::now(),
                     width,
                     CURSOR_CYCLE[frame % 3],
@@ -122,18 +141,18 @@ pub fn view_timer(name: &str, snapshot: bool) -> Result<()> {
                 out.push('\n');
                 let block_lines = out.lines().count() + 1;
                 let rows = height.saturating_sub(block_lines).max(1);
-                for line in print_buzzer_table(timer, width).lines().take(rows) {
+                for line in print_buzzer_table(&timer, width).lines().take(rows) {
                     out.push_str(line);
                     out.push('\n');
                 }
                 out
             },
             move || {
-                let (timer, run) = &*final_state;
+                let (timer, run) = guard_clone(&final_state);
                 let (width, _) = terminal_size();
-                let mut out = render_block(timer, run, Local::now(), width, CURSOR_STATIC);
+                let mut out = render_block(&timer, &run, Local::now(), width, CURSOR_STATIC);
                 out.push('\n');
-                out.push_str(&print_buzzer_table(timer, width));
+                out.push_str(&print_buzzer_table(&timer, width));
                 out
             },
         )
@@ -167,6 +186,12 @@ fn fetch_snapshot() -> Result<Snapshot> {
     }
 }
 
+/// Clone the cached (timer, run) pair from the live single-timer view.
+fn guard_clone(cache: &Arc<Mutex<Option<(Timer, TimerRun)>>>) -> (Timer, TimerRun) {
+    let guard = cache.lock().expect("view cache lock");
+    guard.as_ref().expect("snapshot present").clone()
+}
+
 /// Runs worth displaying: everything except completed terminal states.
 fn active_runs(runs: &[TimerRun]) -> Vec<TimerRun> {
     runs.iter()
@@ -198,15 +223,17 @@ fn render_overview(
     let right = style::rule(" │");
     let rule = style::rule(&"─".repeat(width));
 
+    let header_cell = |label: &str, w: usize| style::header(&pad(&truncate_vis(label, w), w));
+
     let mut out = String::new();
     out.push_str(&style::header("ACTIVE RUNS"));
     out.push('\n');
     out.push_str(&format!(
         "{left}{}{sep}{}{sep}{}{sep}{}{right}",
-        style::header("TIMER"),
-        style::header("STATUS"),
-        style::header("START → END"),
-        style::header("NEXT"),
+        header_cell("TIMER", cols.name),
+        header_cell("STATUS", cols.status),
+        header_cell("START → END", cols.time),
+        header_cell("NEXT", cols.next),
     ));
     out.push('\n');
     out.push_str(&rule);
@@ -261,10 +288,10 @@ fn render_overview(
             out.push('\n');
             out.push_str(&format!(
                 "{left}{}{sep}{}{sep}{}{sep}{}{right}",
-                style::header("TIMER"),
-                style::header("STATUS"),
-                style::header("DURATION"),
-                style::header("BUZZERS"),
+                header_cell("TIMER", cols.name),
+                header_cell("STATUS", cols.status),
+                header_cell("DURATION", cols.time),
+                header_cell("BUZZERS", cols.next),
             ));
             out.push('\n');
             used += 4;
@@ -300,7 +327,8 @@ struct Columns {
 impl Columns {
     fn for_width(width: usize) -> Self {
         // "│ " + a + " │ " + b + " │ " + c + " │ " + d + " │"
-        let overhead = 12usize;
+        // = 2 borders + 3 separators(" │ ") + 2 spacing = 13 fixed columns.
+        let overhead = 13usize;
         let budget = width.saturating_sub(overhead);
 
         let name_min = 8usize;
@@ -460,7 +488,7 @@ fn render_minimal_list(
     let mut lines: Vec<String> = Vec::new();
     let mut overflow = 0usize;
 
-    for run in runs {
+    for run in runs.iter().filter(|r| r.status != TimerStatus::Completed) {
         let Some(timer) = timers.iter().find(|t| t.name == run.timer_name) else {
             continue;
         };
@@ -470,22 +498,22 @@ fn render_minimal_list(
         }
         lines.push(render_minimal(timer, run, now, width, CURSOR_STATIC));
     }
-    for timer in timers
-        .iter()
-        .filter(|t| !runs.iter().any(|r| r.timer_name == t.name))
-    {
+    for timer in timers.iter().filter(|t| {
+        !runs
+            .iter()
+            .any(|r| r.timer_name == t.name && r.status != TimerStatus::Completed)
+    }) {
         if lines.len() >= height {
             overflow += 1;
             continue;
         }
         let total = total_duration(timer);
-        let line = format!(
-            "{} {} — {}",
-            style::dim(&timer.name),
-            style::dim(&format!("total {}", fmt_remaining(total))),
-            style::dim("inactive")
+        // Style after truncation so ANSI never distorts the width math.
+        let line = truncate_vis(
+            &format!("{} total {} — inactive", timer.name, fmt_remaining(total)),
+            width,
         );
-        lines.push(truncate_vis(&line, width));
+        lines.push(style::dim(&line));
     }
 
     if overflow > 0 {
@@ -790,34 +818,44 @@ fn is_tty() -> bool {
     use crossterm::tty::IsTty;
     std::io::stdout().is_tty()
 }
-
-/// Run a full-screen render loop on the alternate screen: re-render every
-/// 100ms, re-fetching the daemon snapshot through `render`, until the user
-/// presses `q`, Escape or Ctrl+C. Arrow keys and mouse scrolling never
-/// exit. A resize merely re-renders. On exit the terminal is restored and
-/// `final_snapshot` is printed to the primary screen so the display stays
-/// visible (and scrollable) instead of vanishing.
+/// Run an animated render loop on the **primary** terminal screen (no
+/// alternate buffer): the frame is drawn from the cursor's saved position
+/// downward and cleared/re-drawn each tick, so the output stays visible in
+/// normal scrollback while it animates. Exit with `q`, Escape or Ctrl+C;
+/// arrow keys and mouse scrolling never exit. On exit the terminal is
+/// restored and `final_snapshot` is printed, leaving the last state in the
+/// scrollback.
 fn animate<F, G>(mut render: F, final_snapshot: G) -> Result<()>
 where
     F: FnMut(usize) -> String,
     G: Fn() -> String,
 {
+    use crossterm::cursor::{RestorePosition, SavePosition};
+
     let mut stdout = std::io::stdout();
 
     enable_raw_mode().map_err(|e| anyhow!("failed to enter raw mode: {e}"))?;
     let restore = TerminalGuard;
 
-    queue!(stdout, EnterAlternateScreen, Hide)?;
+    queue!(stdout, Hide, SavePosition)?;
     stdout.flush()?;
 
     let mut frame = 0usize;
     loop {
-        queue!(
-            stdout,
-            MoveTo(0, 0),
-            Clear(ClearType::All),
-            Print(render(frame)),
-        )?;
+        // Reserve one line so the final printed line never triggers a
+        // terminal scroll mid-frame.
+        let (_, height) = terminal_size();
+        let budget = height.saturating_sub(1).max(1);
+        let body: Vec<String> = render(frame)
+            .lines()
+            .take(budget)
+            .map(str::to_string)
+            .collect();
+
+        queue!(stdout, RestorePosition, Clear(ClearType::FromCursorDown))?;
+        for line in &body {
+            queue!(stdout, Print(line), Print("\r\n"))?;
+        }
         stdout.flush()?;
 
         if poll(std::time::Duration::from_millis(100))? {
@@ -832,7 +870,9 @@ where
                     if quit {
                         break;
                     }
-                    // Arrow keys / any other key: ignored — the view stays.
+                    // Arrow keys / any other key: ignored — the view stays
+                    // up; the mouse wheel scrolls the primary buffer
+                    // natively (no mouse capture is enabled).
                 }
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -841,25 +881,26 @@ where
         frame += 1;
     }
 
-    // Restore the primary screen, then print the final snapshot so the
-    // display persists in scrollback instead of disappearing.
+    // Restore the cursor, then print the final snapshot so the display
+    // persists in scrollback instead of disappearing.
     drop(restore);
     println!("{}", final_snapshot());
     Ok(())
 }
 
-/// Restore the terminal on any exit path (including panics/errors): leave
-/// the alternate screen, show the cursor, exit raw mode.
+/// Restore the terminal on any exit path (including panics/errors): show
+/// the cursor, exit raw mode. No alternate screen to leave — the view
+/// lives on the primary screen.
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        use crossterm::cursor::RestorePosition;
         let mut stdout = std::io::stdout();
-        let _ = queue!(stdout, Show, LeaveAlternateScreen);
+        let _ = queue!(stdout, RestorePosition, Show);
         let _ = stdout.flush();
         let _ = disable_raw_mode();
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1008,21 +1049,53 @@ mod tests {
         assert!(!block.contains("X-"), "{block}");
     }
 
+    /// Terminal-visible width of a possibly-styled line: strips ANSI
+    /// escape sequences before measuring (the parallel style tests may
+    /// force color on globally).
+    fn vis_width(s: &str) -> usize {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                // consume CSI sequence: ESC [ params ... final byte in @-~
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for c2 in chars.by_ref() {
+                        if ('@'..='~').contains(&c2) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        out.width()
+    }
+
     #[test]
     fn overview_lines_never_exceed_the_width() {
         let timers: Vec<Timer> = (0..5).map(|i| timer(&format!("t{i}"), &[60])).collect();
         let runs: Vec<TimerRun> = (0..5).map(|i| running_run(&format!("t{i}"), 10)).collect();
-        for width in [40usize, 80, 120, 200] {
+        // Sweep the full practical width range, including very narrow
+        // (below MIN_TABLE_WIDTH the table degrades to the minimal list,
+        // so only widths >= 40 produce detail/progress rows).
+        let mut widths: Vec<usize> = (40..=80).collect();
+        widths.extend([96, 120, 160, 200, 240]);
+        for width in widths {
             // render_overview reads the real terminal; emulate by sizing the
             // columns directly and asserting the row builder stays in bounds.
             let cols = Columns::for_width(width);
             let t = &timers[0];
             let r = &runs[0];
             let detail = active_detail_row(t, r, Local::now(), &cols, false, false);
-            assert!(detail.width() <= width, "detail {detail:?} exceeds {width}");
+            assert!(
+                vis_width(&detail) <= width,
+                "detail {detail:?} exceeds {width}"
+            );
             let progress = progress_row(t, r, Local::now(), width, &cols, false);
             assert!(
-                progress.width() <= width,
+                vis_width(&progress) <= width,
                 "progress {progress:?} exceeds {width}"
             );
         }

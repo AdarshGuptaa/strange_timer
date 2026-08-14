@@ -84,7 +84,14 @@ typing. Raise it with `STRANGETIMER_LOG=debug` (or `info`).
 `strangetimer install-completions` writes the completion script to the
 per-user location for your shell (bash-completion dir, fish completions,
 `~/.zfunc` for zsh, or prints the PowerShell profile line). `strangetimer
-completions <shell>` prints the raw script.
+completions <shell>` prints the raw script, and `strangetimer completions
+--doctor` diagnoses missing suggestions (stale scripts, wrong $PATH
+binary).
+
+Generated scripts invoke `strangetimer` via `$PATH` (argv[0] trick), never
+a build path - so moving/rebuilding binaries never breaks completion.
+Re-run `install-completions` after upgrades. In tests, put the test binary
+directory first on $PATH so the script resolves it.
 
 Completions use the clap_complete **engine** (`unstable-dynamic` feature):
 the script calls back into the CLI binary, which answers with live
@@ -103,12 +110,30 @@ echo "${COMPREPLY[*]}"
 `commands/view.rs` builds the overview as an exact-width table: cells are
 truncated and padded by *display* width (`unicode-width`) on raw text and
 only then styled, so ANSI codes never shift columns and no line wraps.
-Each active timer spans two physical rows — a details row and a progress
-row with the bar on its own line. `view timers` runs live by default
-(alternate screen; only `q`/`Escape`/`Ctrl+C` exit; arrow keys and mouse
-scrolling are ignored; the snapshot is refetched periodically; a final
-snapshot is printed to the primary screen on exit so the display stays in
-scrollback). `view timers --snapshot` prints a static, persistent view.
+Each active timer spans two physical rows - a details row and a progress
+row with the bar on its own line.
+
+`view timers` animates on the **primary terminal screen** (no alternate
+buffer): the frame is drawn from the saved cursor position and cleared
+each tick, so output stays in normal scrollback. Only `q`/`Escape`/
+`Ctrl+C` exit; arrow keys and mouse scrolling are ignored. The daemon
+snapshot is refetched every ~1s (single-timer view too), and a final
+snapshot is printed on exit. `view timers --snapshot` prints a static,
+persistent view.
+
+### Buzzer ringing events
+
+The daemon keeps a bounded, memory-only queue of `BuzzerEvent`s and
+`strangetimer watch` polls them, printing:
+
+```text
+<timer> ringing | <types> | <time>
+-> strangetimer resume <timer> to resume!   (only for run -u)
+```
+
+Events are never printed from the daemon logger (that would corrupt
+interactive terminals); watchers poll `GetEvents { after_id }` so they
+never miss or duplicate events.
 
 ### Test seams
 
@@ -123,6 +148,16 @@ side effects without touching the desktop:
   scripts assert command construction).
 - `STRANGETIMER_GUI_TESTS=1` opts into the `#[ignore]`d real-desktop
   tests (focus, playback) — never run in CI.
+
+### Terminal focus (`run -u`)
+
+At `run -u` time the CLI captures a `FocusSpec` (X11 window id + title +
+DISPLAY/XAUTHORITY; Wayland is flagged) and stores it JSON-encoded in
+`TimerRun::interrupt_focus`. When a buzzer fires the daemon activates the
+window id via `wmctrl -i -a` (fallback `xdotool windowactivate --sync`,
+then title search), carrying the session env, with retries after async
+player/browser launches. Wayland is reported unsupported instead of
+pretending. The systemd unit also carries the common GUI env vars.
 
 ### Colored output
 

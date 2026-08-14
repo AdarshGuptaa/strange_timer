@@ -55,6 +55,23 @@ pub fn register_autostart() -> Result<()> {
             .with_context(|| format!("failed to create systemd user dir {}", unit_dir.display()))?;
 
         let unit_path = unit_dir.join("strangetimer.service");
+        // Carry the interactive session's GUI environment into the unit so
+        // buzzer actions (window focus, media playback) work even when the
+        // service starts outside the session.
+        let mut env_lines = String::new();
+        for var in [
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+        ] {
+            if let Ok(value) = std::env::var(var) {
+                if !value.is_empty() {
+                    env_lines.push_str(&format!("Environment={var}={value}\n"));
+                }
+            }
+        }
         let unit = format!(
             "[Unit]\n\
              Description=StrangeTimer Daemon\n\
@@ -63,7 +80,7 @@ pub fn register_autostart() -> Result<()> {
              [Service]\n\
              ExecStart={}\n\
              Restart=on-failure\n\
-             \n\
+             {env_lines}\
              [Install]\n\
              WantedBy=default.target\n",
             daemon_path.display()

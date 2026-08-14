@@ -174,13 +174,18 @@ pub enum Command {
       strangetimer completions zsh\n\
       strangetimer completions fish\n\
       strangetimer completions powershell\n\
+      strangetimer completions --doctor\n\
     \n\
     Prefer `strangetimer install-completions`, which places the right\n\
-    script in the right location for you.")]
+    script in the right location for you. `--doctor` diagnoses missing\n\
+    tab suggestions (stale scripts, wrong binary in $PATH).")]
     Completions {
-        /// Which shell to generate completions for.
+        /// Which shell to generate completions for (omit with `--doctor`).
         #[arg(value_enum)]
-        shell: Shell,
+        shell: Option<Shell>,
+        /// Diagnose why <Tab> suggestions may be missing.
+        #[arg(long)]
+        doctor: bool,
     },
     /// Install shell completions so <Tab> works in your terminal.
     #[command(after_help = "Examples:\n\
@@ -196,6 +201,16 @@ pub enum Command {
         #[arg(long, value_enum)]
         shell: Option<Shell>,
     },
+    /// Watch buzzer-ringing notifications as they fire.
+    #[command(after_help = "Examples:\n\
+    \n\
+      strangetimer watch\n\
+    \n\
+    Prints one line per fired buzzer:\n\
+      <timer> ringing | <type> | <time>\n\
+    plus `strangetimer resume <timer>` when the run is in user-interrupt\n\
+    mode. Ctrl+C stops the watcher.")]
+    Watch,
     /// View timers, buzzers, or a single timer's details.
     #[command(after_help = "Examples:\n\
     \n\

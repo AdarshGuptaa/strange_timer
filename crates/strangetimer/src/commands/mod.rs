@@ -7,6 +7,7 @@ pub mod examples;
 pub mod install_completions;
 pub mod timers;
 pub mod view;
+pub mod watch;
 
 use anyhow::{Context, Result};
 use strangetimer_core::ipc::{socket_name, ClientMessage, ServerMessage};
@@ -126,5 +127,6 @@ fn variant_of(msg: &ServerMessage) -> &'static str {
         ServerMessage::TimerDetail { .. } => "TimerDetail",
         ServerMessage::BuzzerList(_) => "BuzzerList",
         ServerMessage::Status { .. } => "Status",
+        ServerMessage::BuzzerEvents(_) => "BuzzerEvents",
     }
 }

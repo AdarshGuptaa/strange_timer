@@ -50,6 +50,24 @@ pub enum BuzzerAction {
     },
 }
 
+impl BuzzerAction {
+    /// Human-readable action type, shared by the CLI (`view buzzers`,
+    /// completions) and the daemon (buzzer events).
+    pub fn label(&self) -> &'static str {
+        match self {
+            BuzzerAction::DefaultAudio | BuzzerAction::Audio(_) => "audio",
+            BuzzerAction::DefaultVideo | BuzzerAction::Video(_) => "video",
+            BuzzerAction::CloseAllWindows => "close_windows",
+            BuzzerAction::Application(_) => "application",
+            BuzzerAction::Url(_) => "url",
+            BuzzerAction::Bash(_) => "bash",
+            BuzzerAction::CloseApplication(_) => "close_app",
+            BuzzerAction::FocusWindow(_) => "focus_window",
+            BuzzerAction::Llm { .. } => "llm",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LlmPromptSource {
     Inline(String),
@@ -100,6 +118,57 @@ pub struct FireEvent {
     pub buzzer_index: usize,
     /// Repetition (0-based) during which the buzzer fired.
     pub repetition: u32,
+}
+
+/// A user-facing "the buzzer is ringing" notification, pushed by the
+/// daemon and consumed by `strangetimer watch` (and future integrations).
+/// Kept in memory only — events are transient.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuzzerEvent {
+    /// Monotonic sequence id used by watchers to resume where they left off.
+    pub id: u64,
+    pub timer_name: String,
+    pub buzzer_name: String,
+    /// Action types of the buzzer (audio, video, ...).
+    pub buzzer_types: Vec<String>,
+    pub fired_at: chrono::DateTime<chrono::Local>,
+    pub repetition: u32,
+    /// True when the run is in user-interrupt mode and is now waiting for
+    /// `strangetimer resume <timer>`.
+    pub requires_ack: bool,
+}
+
+/// What the daemon needs to bring the user's terminal back to the front
+/// after a buzzer fires. Captured at `run -u` time and stored (JSON) in
+/// `TimerRun::interrupt_focus` so focus works even when the daemon is a
+/// system service without the interactive session environment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FocusSpec {
+    /// X11 window id (e.g. `0x0123abcd`) of the terminal that started the
+    /// run — the reliable activation target.
+    pub window_id: Option<String>,
+    /// Window title, used as a fallback when the id is gone.
+    pub title: Option<String>,
+    /// `DISPLAY` of the session the run started in.
+    pub display: Option<String>,
+    /// `XAUTHORITY` of that session.
+    pub xauthority: Option<String>,
+    /// True when the session is Wayland (X11 tools cannot reliably focus;
+    /// the daemon reports unsupported instead of pretending success).
+    pub wayland: bool,
+}
+
+impl FocusSpec {
+    /// Serialize the spec into the `interrupt_focus` storage field.
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// Parse the storage field; a plain title (pre-spec installs) parses
+    /// as a legacy title-only target.
+    pub fn decode(stored: &str) -> Option<FocusSpec> {
+        serde_json::from_str(stored).ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

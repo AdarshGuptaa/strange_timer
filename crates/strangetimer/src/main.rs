@@ -49,10 +49,22 @@ fn run(cli: Cli) -> Result<()> {
                 commands::examples::list_examples()
             }
         }
-        Command::Completions { shell } => commands::completions::print_completions(shell),
+        Command::Completions { shell, doctor } => {
+            if doctor {
+                commands::completions::completion_doctor()
+            } else {
+                let shell = shell.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "a shell is required: `strangetimer completions bash` (or use --doctor)"
+                    )
+                })?;
+                commands::completions::print_completions(shell)
+            }
+        }
         Command::InstallCompletions { shell } => {
             commands::install_completions::install_completions(shell)
         }
+        Command::Watch => commands::watch::watch(),
         Command::View { name, snapshot } => match name.as_str() {
             "timers" => commands::view::view_timers(snapshot),
             "buzzers" => commands::buzzers::view_buzzers(),

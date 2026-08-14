@@ -534,6 +534,27 @@ runs at once (the legacy `interrupt_pending` marker is migrated on
 load). A restart keeps runs paused-pending without looping audio during
 downtime.
 
+### 8.7 Buzzer ringing events and watch
+
+The daemon keeps a bounded, memory-only `VecDeque<BuzzerEvent>` (id,
+timer, buzzer, types, fired_at, repetition, requires_ack) and answers
+`GetEvents { after_id }`. `strangetimer watch` polls it every 400ms and
+prints `<timer> ringing | <types> | <time>`, plus the
+`-> strangetimer resume <timer>` hint for user-interrupt runs. Events are
+never emitted through the daemon logger, so they cannot corrupt
+interactive terminals; `after_id` makes watchers at-least-once without
+duplicates.
+
+### 8.8 Terminal focus (`run -u`)
+
+`FocusSpec` (core model) captures the X11 window id, title, DISPLAY and
+XAUTHORITY at `run -u` time, JSON-encoded in `interrupt_focus`; Wayland
+sessions are flagged. At fire time the daemon activates by window id
+(`wmctrl -i -a`, fallback `xdotool windowactivate --sync`, then title
+search) carrying the session env, with retries after async
+player/browser launches; Wayland reports unsupported rather than failing
+silently. The autostart unit also carries the common GUI env vars.
+
 ### 8.5 Logging
 
 `log.rs` appends every message (debug/info/warn) to `daemon.log` in the
@@ -602,7 +623,7 @@ ACTIVE RUNS
 ```
 
 - **Active** rows are live runs sorted by next-buzzer time, each spanning
-  two physical lines — details, then a full-width progress bar on its own
+  two physical lines - details, then a full-width progress bar on its own
   line; **inactive** rows are defined timers without a live run.
 - Columns are sized from the exact terminal width; cells are truncated and
   padded by display width (unicode-width) *before* styling, so ANSI codes

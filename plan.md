@@ -1094,6 +1094,103 @@ Problem: repeated `default_video` timers appeared to fire once.
 
 ---
 
+---
+
+## Prompt 42 — Completion system (priority)
+
+```
+- Scripts invoke `strangetimer` via $PATH (argv[0] fix) so stale
+  target/debug, target/release or CI paths never break completion;
+  release archives and install-completions re-generate from the live
+  binary. Reinstall after upgrades.
+- `strangetimer completions --doctor` diagnoses missing suggestions:
+  binary/version, shell, installed script locations, dynamic vs static
+  script, stale embedded paths, and the fix commands.
+- `create timer` variadic slots use a content heuristic (digit token =
+  offset slot; name/empty = buzzer slot), so consecutive bare offsets
+  like `30s 30s 30s` complete correctly; a complete offset expands to
+  `1m <buzzer>` instead of being replaced.
+- State-aware sets: pause (running), resume (paused), stop (live runs),
+  delete buzzer (non-builtin); one consistent daemon snapshot per
+  request; built-in buzzers synthesized locally before first daemon run.
+- Tests: unit + real bash-script e2e (PATH-resolved), no build paths
+  embedded, doctor output.
+```
+
+## Prompt 43 — Terminal-only animated view
+
+```
+- Remove the alternate screen; the live view animates on the primary
+  terminal (saved cursor position + Clear(FromCursorDown) per frame), so
+  output stays in normal scrollback while animating.
+- Only q/Escape/Ctrl+C exit; arrow keys and mouse scrolling are ignored
+  (the wheel scrolls the primary buffer natively).
+- Daemon snapshots refetched every ~1s for both the overview and the
+  single-timer view.
+- A final snapshot is printed on exit; --snapshot remains the static,
+  scrollable printout.
+```
+
+## Prompt 44 — Exact-width table fixes
+
+```
+- Row overhead corrected to exactly 13 columns; headers padded to the
+  same raw widths as data cells.
+- Progress rows padded by display width (unicode-width), not byte length.
+- Buzzer table handles very narrow terminals (name-only rows below 12
+  columns; Time Remaining column dropped correctly).
+- Minimal list filters completed runs and styles after truncation.
+- Timer/buzzer names with control characters are rejected at creation.
+- Tests sweep widths 40-240 (plus narrow buzzer-table cases) with ANSI
+  enabled via a visible-width measurement.
+```
+
+## Prompt 45 — Reliable terminal focus
+
+```
+- FocusSpec (JSON in interrupt_focus) captures the X11 window id, title,
+  DISPLAY and XAUTHORITY at run -u time; Wayland sessions are flagged.
+- At fire time: activate by window id (wmctrl -i -a, fallback xdotool
+  windowactivate --sync, then title search) with the session env, plus
+  retries after async player/browser launches.
+- Wayland reports unsupported instead of pretending success; the
+  autostart unit carries the common GUI env vars.
+- Tests: capture/activation via STRANGETIMER_TEST_XDOTOOL/WMCTRL seams;
+  Wayland skip; missing tools degrade gracefully.
+```
+
+## Prompt 46 — Buzzer stacking, validation, and notifications
+
+```
+- Offsets are absolute from run start; equal offsets fire together.
+  Help/examples document `30s a 1m b 1m30s c` chaining.
+- Unknown buzzer names and control-character names are rejected at
+  creation.
+- Daemon keeps a bounded, memory-only BuzzerEvent queue (id, timer,
+  buzzer, types, fired_at, repetition, requires_ack) and answers
+  GetEvents { after_id }.
+- New `strangetimer watch` prints per event:
+      <timer> ringing | <types> | <time>
+      -> strangetimer resume <timer> to resume!   (run -u only)
+  Events never come from the daemon logger, so interactive terminals
+  stay clean; after_id gives at-least-once without duplicates.
+- Tests: watch e2e (ringing line, resume hint), stacking parse/view e2e,
+  unknown-buzzer rejection.
+```
+
+## Prompt 47 — Video and recovery robustness
+
+```
+- Recovery catches up multiple fully-elapsed repetitions: a Count(3)
+  timer down for three periods fires all three alarms on restart.
+- e2e: kill daemon before the first fire, stay down ~5 periods, restart
+  with the recording opener, assert three opens.
+- Existing mock-opener repeat tests, remote exampleVideoUrl, opt-in GUI
+  tests (STRANGETIMER_GUI_TESTS=1) unchanged.
+```
+
+---
+
 ## Build Order Summary
 
 ```
@@ -1139,6 +1236,13 @@ Prompt 38  — Context-aware completions (create-timer slots, state-aware)
 Prompt 39  — Non-blocking user-interrupt + multi-pending support
 Prompt 40  — FireEvent, repetition reset, mock opener, remote video
 Prompt 41  — Safe desktop-action test seams (PKILL/WMCTRL/... overrides)
+── /compact ──
+Prompt 42  — Completion system (PATH-resolved scripts, --doctor)
+Prompt 43  — Terminal-only animated view (no alternate screen)
+Prompt 44  — Exact-width table fixes (overhead 13, padded headers)
+Prompt 45  — Reliable terminal focus (window id, env, Wayland detect)
+Prompt 46  — Buzzer stacking validation + `strangetimer watch`
+Prompt 47  — Recovery catch-up of missed repetitions
 ```
 
-(Implemented in one pass; prompts 36-41 shipped together.)
+(Implemented in one pass; prompts 42-47 shipped together.)

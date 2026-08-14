@@ -81,6 +81,11 @@ pub enum ClientMessage {
     /// exits — the same teardown path as SIGINT/SIGTERM. Used by
     /// `strangetimer daemon stop/restart`.
     Shutdown,
+    /// Fetch buzzer-ringing events newer than `after_id` (None = all).
+    /// Used by `strangetimer watch`.
+    GetEvents {
+        after_id: Option<u64>,
+    },
 }
 
 /// Responses sent from the daemon to the CLI.
@@ -115,6 +120,8 @@ pub enum ServerMessage {
         pid: u32,
         version: String,
     },
+    /// Reply to `ClientMessage::GetEvents`.
+    BuzzerEvents(Vec<crate::model::BuzzerEvent>),
 }
 
 /// Write a single length-prefixed JSON message to `stream`.

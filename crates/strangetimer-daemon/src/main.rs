@@ -11,7 +11,9 @@ use anyhow::{Context, Result};
 use interprocess::local_socket::traits::tokio::Listener as TokioListener;
 use strangetimer_core::ipc::socket_name;
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
-use strangetimer_core::model::{Buzzer, BuzzerAction, FireEvent, TimerStatus};
+use strangetimer_core::model::{
+    Buzzer, BuzzerAction, BuzzerEvent, FireEvent, RepeatMode, TimerStatus,
+};
 use strangetimer_core::persistence::{
     load_buzzers, load_state, load_timers, save_buzzers, save_state,
 };
@@ -161,17 +163,35 @@ async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
     info!("BUZZ: {name} (rep {})", event.repetition);
 
     let run = state.get_run(timer_name).await;
-    if run.as_ref().is_some_and(|r| r.user_interrupt) {
+    let requires_ack = run.as_ref().is_some_and(|r| r.user_interrupt);
+    if requires_ack {
         if let Err(e) = state.begin_interrupt(timer_name).await {
             warn!("failed to begin user interrupt for {timer_name:?}: {e:#}");
         }
         buzzers::dispatch_interrupt(&state, &buzzer.actions, timer_name).await;
-        return;
+    } else {
+        for action in &buzzer.actions {
+            buzzers::dispatch(&state, action).await;
+        }
     }
 
-    for action in &buzzer.actions {
-        buzzers::dispatch(&state, action).await;
-    }
+    // Announce the ringing so `strangetimer watch` can print it.
+    let types: Vec<String> = buzzer
+        .actions
+        .iter()
+        .map(|a| a.label().to_string())
+        .collect();
+    state
+        .push_event(BuzzerEvent {
+            id: 0, // assigned by the daemon
+            timer_name: timer_name.to_string(),
+            buzzer_name: name.clone(),
+            buzzer_types: types,
+            fired_at: chrono::Local::now(),
+            repetition: event.repetition,
+            requires_ack,
+        })
+        .await;
 }
 
 /// Fire alarms that became due while the daemon was stopped, and promote
@@ -192,26 +212,57 @@ async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<FireEvent>)
             match run.status {
                 TimerStatus::Running => {
                     // Effective elapsed time (pause-shifted timeline).
-                    let elapsed = (now - run.started_at) - run.elapsed_before_pause;
+                    let mut elapsed = (now - run.started_at) - run.elapsed_before_pause;
 
                     let Some(timer) = timers.iter().find(|t| t.name == run.timer_name) else {
                         continue;
                     };
 
-                    for (idx, buzzer_ref) in timer.buzzers.iter().enumerate() {
-                        if run.fired_indices.contains(&idx) {
+                    let rep_len = timer
+                        .buzzers
+                        .iter()
+                        .map(|b| b.offset)
+                        .max()
+                        .unwrap_or(chrono::Duration::zero());
+
+                    // Catch up every fully-elapsed repetition, then mark
+                    // the buzzers due in the current one. A Count(3) timer
+                    // down for three periods fires all three alarms.
+                    loop {
+                        let all_fired = run.fired_indices.len() == timer.buzzers.len();
+                        let rep_done = rep_len > chrono::Duration::zero()
+                            && elapsed >= rep_len
+                            && all_fired
+                            && (matches!(run.repetitions, RepeatMode::Infinite)
+                                || match run.repetitions {
+                                    RepeatMode::Count(n) => run.current_rep + 1 < n,
+                                    RepeatMode::Infinite => true,
+                                });
+                        if rep_done {
+                            run.current_rep += 1;
+                            run.fired_indices.clear();
+                            run.elapsed_before_pause = chrono::Duration::zero();
+                            elapsed -= rep_len;
+                            state_changed = true;
                             continue;
                         }
-                        if elapsed >= buzzer_ref.offset {
-                            run.fired_indices.push(idx);
-                            missed.push(FireEvent {
-                                timer_name: run.timer_name.clone(),
-                                buzzer_name: buzzer_ref.buzzer_name.clone(),
-                                buzzer_index: idx,
-                                repetition: run.current_rep,
-                            });
-                            state_changed = true;
+
+                        for (idx, buzzer_ref) in timer.buzzers.iter().enumerate() {
+                            if run.fired_indices.contains(&idx) {
+                                continue;
+                            }
+                            if elapsed >= buzzer_ref.offset {
+                                run.fired_indices.push(idx);
+                                missed.push(FireEvent {
+                                    timer_name: run.timer_name.clone(),
+                                    buzzer_name: buzzer_ref.buzzer_name.clone(),
+                                    buzzer_index: idx,
+                                    repetition: run.current_rep,
+                                });
+                                state_changed = true;
+                            }
                         }
+                        break;
                     }
                 }
                 TimerStatus::Scheduled => {
@@ -423,6 +474,9 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        ClientMessage::GetEvents { after_id } => {
+            ServerMessage::BuzzerEvents(state.events_after(after_id).await)
+        }
         ClientMessage::Shutdown => {
             // Handled in `handle_connection` before dispatch; this arm is
             // unreachable but kept exhaustive.
@@ -459,6 +513,7 @@ fn variant_name(msg: &ClientMessage) -> &'static str {
         ClientMessage::ConfirmDestructive => "ConfirmDestructive",
         ClientMessage::Ping => "Ping",
         ClientMessage::Shutdown => "Shutdown",
+        ClientMessage::GetEvents { .. } => "GetEvents",
     }
 }
 

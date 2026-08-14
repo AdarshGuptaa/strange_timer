@@ -94,8 +94,8 @@ pub async fn dispatch_interrupt(
         run.and_then(|r| r.interrupt_focus)
     };
     if let Some(window) = focus {
-        info!("user interrupt: focusing terminal {window:?}");
-        focus_window::fire_focus_window(&window);
+        info!("user interrupt: focusing terminal");
+        focus_window::fire_focus_window_retry(&window).await;
     }
 }
 

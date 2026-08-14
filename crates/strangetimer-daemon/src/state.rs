@@ -1,8 +1,15 @@
+use std::collections::VecDeque;
+
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Local};
-use strangetimer_core::model::{Buzzer, DaemonState, RepeatMode, Timer, TimerRun, TimerStatus};
+use strangetimer_core::model::{
+    Buzzer, BuzzerEvent, DaemonState, RepeatMode, Timer, TimerRun, TimerStatus,
+};
 use strangetimer_core::persistence::{save_buzzers, save_state, save_timers};
 use tokio::sync::Mutex;
+
+/// How many ringing events are kept for `strangetimer watch` (memory-only).
+const MAX_EVENTS: usize = 100;
 
 /// AppState manages the in-memory state of the daemon, providing thread-safe
 /// access to timers, buzzers, and active timer runs. Every mutating method
@@ -21,6 +28,9 @@ pub struct StateInner {
     /// Opt-in flag for the destructive `close_windows` buzzer. Set via the
     /// `strangetimer confirm-destructive` command; not persisted.
     pub close_windows_confirmed: bool,
+    /// Ringing-event log for `strangetimer watch` (memory-only, bounded).
+    pub events: VecDeque<BuzzerEvent>,
+    pub next_event_id: u64,
 }
 
 impl AppState {
@@ -31,6 +41,8 @@ impl AppState {
                 buzzers,
                 state,
                 close_windows_confirmed: false,
+                events: VecDeque::new(),
+                next_event_id: 0,
             }),
             pending: std::sync::Mutex::new(Vec::new()),
         }
@@ -45,9 +57,24 @@ impl AppState {
     /// Add a timer definition. Refuses duplicate names (timer names are the
     /// identity key used by every other command).
     pub async fn add_timer(&self, timer: Timer) -> Result<()> {
+        validate_name(&timer.name)?;
         let mut inner = self.inner.lock().await;
         if inner.timers.iter().any(|t| t.name == timer.name) {
             return Err(anyhow!("a timer named {:?} already exists", timer.name));
+        }
+        // Reject unknown buzzer references up front instead of silently
+        // swallowing the alarm at fire time.
+        for buzzer_ref in &timer.buzzers {
+            if !inner
+                .buzzers
+                .iter()
+                .any(|b| b.name == buzzer_ref.buzzer_name)
+            {
+                return Err(anyhow!(
+                    "no buzzer named {:?} — create it first with                      `strangetimer create buzzer`",
+                    buzzer_ref.buzzer_name
+                ));
+            }
         }
         inner.timers.push(timer);
         save_timers(&inner.timers)?;
@@ -111,6 +138,7 @@ impl AppState {
     /// Add a buzzer library entry. Refuses duplicate names (built-in or
     /// custom).
     pub async fn add_buzzer(&self, buzzer: Buzzer) -> Result<()> {
+        validate_name(&buzzer.name)?;
         let mut inner = self.inner.lock().await;
         if inner.buzzers.iter().any(|b| b.name == buzzer.name) {
             return Err(anyhow!("a buzzer named {:?} already exists", buzzer.name));
@@ -353,6 +381,29 @@ impl AppState {
         inner.close_windows_confirmed = true;
     }
 
+    // --- Ringing events (`strangetimer watch`) ---
+
+    /// Push a ringing event. Bounded: the oldest events are dropped so a
+    /// slow watcher never grows memory unboundedly.
+    pub async fn push_event(&self, mut event: BuzzerEvent) {
+        let mut inner = self.inner.lock().await;
+        event.id = inner.next_event_id;
+        inner.next_event_id += 1;
+        inner.events.push_back(event);
+        while inner.events.len() > MAX_EVENTS {
+            inner.events.pop_front();
+        }
+    }
+
+    /// Events with id > `after_id` (all when None), oldest first.
+    pub async fn events_after(&self, after_id: Option<u64>) -> Vec<BuzzerEvent> {
+        let inner = self.inner.lock().await;
+        match after_id {
+            Some(id) => inner.events.iter().filter(|e| e.id > id).cloned().collect(),
+            None => inner.events.iter().cloned().collect(),
+        }
+    }
+
     // --- User-interrupt (`run -u`) ---
 
     /// Pause the run and mark it as awaiting acknowledgement. Called before
@@ -404,6 +455,20 @@ impl AppState {
     pub fn interrupt_pending_sync(&self) -> Vec<String> {
         self.pending.lock().expect("pending lock").clone()
     }
+}
+
+/// Reject names that would corrupt terminal rendering or shell quoting.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("name must not be empty"));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(anyhow!(
+            "name {:?} contains control characters — not allowed",
+            name
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -603,6 +668,36 @@ mod tests {
         assert!(!s.is_close_windows_confirmed().await);
         s.set_close_windows_confirmed().await;
         assert!(s.is_close_windows_confirmed().await);
+    }
+
+    #[tokio::test]
+    async fn add_timer_validates_buzzer_names() {
+        let s = fresh_state();
+        let mut t = timer("t");
+        t.buzzers.push(BuzzerRef {
+            offset: Duration::minutes(1),
+            buzzer_name: "no_such_buzzer".to_string(),
+        });
+        let err = s.add_timer(t).await.unwrap_err().to_string();
+        assert!(err.contains("no buzzer named"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn names_with_control_characters_are_rejected() {
+        let s = fresh_state();
+        let t = timer("bad\nname");
+        let err = s.add_timer(t.clone()).await.unwrap_err().to_string();
+        assert!(err.contains("control characters"), "{err}");
+        let err = s
+            .add_buzzer(Buzzer {
+                name: "bad\x1b[31m".to_string(),
+                actions: vec![BuzzerAction::DefaultAudio],
+                builtin: false,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("control characters"), "{err}");
     }
 
     #[tokio::test]

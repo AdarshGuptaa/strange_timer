@@ -39,15 +39,13 @@ pub fn running_timer_names(current: &OsStr) -> Vec<CompletionCandidate> {
     run_candidates(current, |r| r.status == TimerStatus::Running)
 }
 
-/// Timers paused or awaiting a user-interrupt acknowledgement (for
-/// `resume`).
+/// Timers that can actually be resumed (for `resume`): paused runs,
+/// which includes user-interrupt runs awaiting acknowledgement.
 pub fn paused_timer_names(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return vec![];
     };
-    run_candidates(current, |r| {
-        r.status == TimerStatus::Paused || r.user_interrupt
-    })
+    run_candidates(current, |r| r.status == TimerStatus::Paused)
 }
 
 /// Timers with any live run (for `stop`).
@@ -96,39 +94,62 @@ pub fn deletable_buzzer_names(current: &OsStr) -> Vec<CompletionCandidate> {
 }
 
 fn buzzer_candidate(b: Buzzer) -> CompletionCandidate {
-    let kinds: Vec<&str> = b.actions.iter().map(action_label).collect();
+    let kinds: Vec<&str> = b
+        .actions
+        .iter()
+        .map(action_label)
+        .chain(BUILTIN_BUZZERS.iter().filter_map(|(name, label)| {
+            (name == &b.name && b.actions.is_empty()).then_some(*label)
+        }))
+        .collect();
     CompletionCandidate::new(b.name).help(Some(kinds.join(", ").into()))
 }
 
 /// Candidates for the variadic `(offset, [buzzer])` slots of `create
-/// timer`. `complete_at` sees each token's position: even positions are
-/// offset slots, odd positions are buzzer slots. When the current token is
-/// already a complete offset, the suggestion appends the buzzer so `1m<Tab>`
-/// expands to `1m <buzzer>` instead of replacing the offset.
+/// timer`.
+///
+/// The grammar is ambiguous at each position (offsets may repeat without
+/// buzzer names), so position parity is not reliable — the current token's
+/// *content* decides the slot:
+///
+/// - a token starting with a digit is an offset slot: suggest example
+///   offsets, and when it is already a complete offset (`1m<Tab>`) also
+///   suggest `1m <buzzer>` expansions so the offset is preserved;
+/// - anything else (including empty) is a buzzer slot: suggest the buzzer
+///   library, plus example offsets on an empty token so both continuations
+///   are offered.
 pub struct CreateTimerCompleter;
 
 impl ValueCompleter for CreateTimerCompleter {
-    fn complete_at(&self, arg_index: usize, current: &OsStr) -> Vec<CompletionCandidate> {
+    fn complete_at(&self, _arg_index: usize, current: &OsStr) -> Vec<CompletionCandidate> {
         let Some(current) = current.to_str() else {
             return vec![];
         };
-        if arg_index % 2 == 1 {
-            return buzzer_names(OsStr::new(current));
-        }
-        let mut candidates = offset_candidates(current);
-        if parse_offset(current).is_ok() {
-            for b in buzzer_defs() {
-                candidates.push(
-                    CompletionCandidate::new(format!("{current} {}", b.name)).help(Some(
-                        b.actions
-                            .iter()
-                            .map(action_label)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                            .into(),
-                    )),
-                );
+
+        if current.starts_with(|c: char| c.is_ascii_digit()) {
+            let mut candidates = offset_candidates(current);
+            if parse_offset(current).is_ok() {
+                for b in buzzer_defs() {
+                    candidates.push(
+                        CompletionCandidate::new(format!("{current} {}", b.name)).help(Some(
+                            b.actions
+                                .iter()
+                                .map(action_label)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                .into(),
+                        )),
+                    );
+                }
             }
+            return candidates;
+        }
+
+        // Buzzer slot (or the very first slot before any offset): offer
+        // buzzers; an empty token additionally offers example offsets.
+        let mut candidates = buzzer_names(OsStr::new(current));
+        if current.is_empty() {
+            candidates.extend(offset_candidates(""));
         }
         candidates
     }
@@ -165,25 +186,50 @@ pub fn view_targets(current: &OsStr) -> Vec<CompletionCandidate> {
 // --- Data sources: live daemon first, persisted files as fallback ------
 
 fn timer_defs() -> Vec<Timer> {
+    state_snapshot()
+        .map(|(timers, _)| timers)
+        .unwrap_or_else(|| load_timers().unwrap_or_default())
+}
+
+fn runs() -> Vec<TimerRun> {
+    state_snapshot()
+        .map(|(_, runs)| runs)
+        .unwrap_or_else(|| load_state().map(|s| s.runs).unwrap_or_default())
+}
+
+/// One consistent daemon snapshot for the whole completion request.
+fn state_snapshot() -> Option<(Vec<Timer>, Vec<TimerRun>)> {
     match send_and_receive_no_autostart(&ClientMessage::GetTimers) {
-        Ok(ServerMessage::TimerList { timers, .. }) => timers,
-        _ => load_timers().unwrap_or_default(),
+        Ok(ServerMessage::TimerList { timers, runs, .. }) => Some((timers, runs)),
+        _ => None,
     }
 }
 
 fn buzzer_defs() -> Vec<Buzzer> {
-    match send_and_receive_no_autostart(&ClientMessage::GetBuzzers) {
+    let mut buzzers = match send_and_receive_no_autostart(&ClientMessage::GetBuzzers) {
         Ok(ServerMessage::BuzzerList(buzzers)) => buzzers,
         _ => load_buzzers().unwrap_or_default(),
+    };
+    // Ensure the built-ins always appear, even before a daemon has seeded
+    // buzzers.json — deterministic suggestions on fresh installs.
+    for builtin in BUILTIN_BUZZERS {
+        if !buzzers.iter().any(|b| b.name == builtin.0) {
+            buzzers.push(Buzzer {
+                name: builtin.0.to_string(),
+                actions: vec![],
+                builtin: true,
+            });
+        }
     }
+    buzzers
 }
 
-fn runs() -> Vec<TimerRun> {
-    match send_and_receive_no_autostart(&ClientMessage::GetTimers) {
-        Ok(ServerMessage::TimerList { runs, .. }) => runs,
-        _ => load_state().map(|s| s.runs).unwrap_or_default(),
-    }
-}
+/// (name, action label) for the built-in buzzer library.
+const BUILTIN_BUZZERS: [(&str, &str); 3] = [
+    ("default_audio", "audio"),
+    ("default_video", "video"),
+    ("close_windows", "close_windows"),
+];
 
 fn action_label(action: &strangetimer_core::model::BuzzerAction) -> &'static str {
     use strangetimer_core::model::BuzzerAction as A;

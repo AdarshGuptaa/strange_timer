@@ -271,7 +271,7 @@ Any other command auto-starts the daemon if it isn't running
 
 | Command | Description |
 |---|---|
-| `strangetimer create timer <name> <offset> [<buzzer> ...]` | Create a timer. Offsets support `30s`, `5m`/`5min`, `2h`, `1D`, `1W` and compounds like `1h30m`. A bare offset uses the built-in `default_audio` buzzer. |
+| `strangetimer create timer <name> <offset> [<buzzer> ...]` | Create a timer. Offsets support `30s`, `5m`/`5min`, `2h`, `1D`, `1W` and compounds like `1h30m`. A bare offset uses the built-in `default_audio` buzzer. Offsets are **absolute** from run start; equal offsets fire together; unknown buzzer names are rejected. |
 | `strangetimer duplicate timer <source> [<new_name>]` | Clone a timer; defaults to `<source>_copy`. |
 | `strangetimer delete timer <name>` | Delete a definition (refused while a run is active). |
 | `strangetimer run <name> [-n count \| -i] [-t HH:MM] [-u]` | Start a run, optionally repeated or scheduled. `-u` pauses at every buzzer until acknowledged with `strangetimer resume <name>`. |
@@ -296,10 +296,12 @@ are seeded on first run and cannot be deleted.
 
 | Command | Description |
 |---|---|
-| `strangetimer view timers` | Live table of active runs plus an inactive section for defined-but-not-running timers (full-screen, color-coded, re-lays out on resize). Add `--snapshot` for a persistent, scrollable printout. |
+| `strangetimer view timers` | Live table of active runs plus an inactive section for defined-but-not-running timers (animated in the terminal itself, color-coded, re-lays out on resize; q/Ctrl+C exits). Add `--snapshot` for a persistent, scrollable printout. |
 | `strangetimer view <timer_name>` | Single-timer progress block + buzzer countdown table. Add `--snapshot` for static output. |
-| `strangetimer completions <bash\|zsh\|fish\|powershell>` | Print a shell completion script. |
-| `strangetimer install-completions [--shell <shell>]` | Install completions into your shell (detects `$SHELL`); <Tab> then suggests subcommands, flags, and your timer/buzzer names. |
+| `strangetimer completions <bash\|zsh\|fish\|powershell>` | Print a shell completion script (dynamic: suggests your timer and buzzer names). |
+| `strangetimer completions --doctor` | Diagnose missing tab suggestions. |
+| `strangetimer install-completions [--shell <shell>]` | Install completions into your shell (detects `$SHELL`); <Tab> then suggests subcommands, flags, and your timer/buzzer names. Re-run after upgrades - scripts call `strangetimer` via `$PATH`. |
+| `strangetimer watch` | Print a `ringing` line for every fired buzzer (with the resume command for user-interrupt runs). |
 
 When stdout is not a terminal, views render as a static snapshot instead of
 animating.

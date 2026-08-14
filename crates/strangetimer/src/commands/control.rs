@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, TimeZone};
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
-use strangetimer_core::model::RepeatMode;
+use strangetimer_core::model::{FocusSpec, RepeatMode};
 
 use crate::cli::RunArgs;
 use crate::commands::{ensure_ok, send_and_receive};
@@ -71,29 +71,58 @@ pub fn run(args: &RunArgs) -> Result<()> {
     }
 }
 
-/// Capture the active window (id or title) so the daemon can focus the
-/// terminal after buzzer actions. Best-effort: `None` when no tooling is
-/// available (e.g. headless CI).
+/// External-tool override for tests (mirrors the daemon's
+/// `STRANGETIMER_TEST_<NAME>` seam).
+fn tool(name: &str) -> String {
+    let key = format!("STRANGETIMER_TEST_{}", name.to_uppercase());
+    std::env::var(&key).unwrap_or_else(|_| name.to_string())
+}
+
+/// Capture the active terminal window so the daemon can focus it after
+/// buzzer actions. Best-effort: `None` when no tooling is available (e.g.
+/// headless CI). The result is a JSON [`FocusSpec`] stored in the run's
+/// `interrupt_focus` field.
 fn capture_active_window() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let out = std::process::Command::new("xdotool")
-            .args(["getactivewindow", "getwindowname"])
+        let wayland = std::env::var("XDG_SESSION_TYPE")
+            .map(|t| t.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+
+        // Prefer the X11 window id — titles change; ids do not.
+        let window_id = std::process::Command::new(tool("xdotool"))
+            .arg("getactivewindow")
             .output()
-            .ok()?;
-        if !out.status.success() {
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let title = window_id.as_ref().and_then(|_| {
+            std::process::Command::new(tool("xdotool"))
+                .arg("getwindowname")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+        if window_id.is_none() && title.is_none() && !wayland {
             return None;
         }
-        let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if title.is_empty() {
-            None
-        } else {
-            Some(title)
-        }
+
+        let spec = FocusSpec {
+            window_id,
+            title,
+            display: std::env::var("DISPLAY").ok(),
+            xauthority: std::env::var("XAUTHORITY").ok(),
+            wayland,
+        };
+        Some(spec.encode())
     }
     #[cfg(target_os = "macos")]
     {
-        let out = std::process::Command::new("osascript")
+        let out = std::process::Command::new(tool("osascript"))
             .args([
                 "-e",
                 "tell application \"System Events\" to get name of first process \
@@ -105,7 +134,11 @@ fn capture_active_window() -> Option<String> {
         if app.is_empty() {
             None
         } else {
-            Some(app)
+            let spec = FocusSpec {
+                title: Some(app),
+                ..FocusSpec::default()
+            };
+            Some(spec.encode())
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
