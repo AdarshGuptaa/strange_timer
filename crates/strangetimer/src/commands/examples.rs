@@ -11,6 +11,10 @@ use crate::style;
 
 /// The project's GitHub page, used by the URL example buzzer.
 const PROJECT_URL: &str = "https://github.com/AdarshGuptaa/strange_timer";
+/// A stable, public sample MP4 used by the remote-video example (the
+/// Google Cloud Storage sample bucket, widely used for media tests).
+const SAMPLE_VIDEO_URL: &str =
+    "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
 
 /// An example buzzer: what it demonstrates, the exact command to create it,
 /// and (for examples with no user-specific files) the actions to install.
@@ -42,6 +46,12 @@ fn examples() -> Vec<ExampleBuzzer> {
             description: "opens the built-in default video clip",
             command: "strangetimer create buzzer exampleVideo --video",
             installable_actions: Some(vec![BuzzerAction::DefaultVideo]),
+        },
+        ExampleBuzzer {
+            name: "exampleVideoUrl",
+            description: "plays a video from the internet (opens in your default player/browser)",
+            command: "strangetimer create buzzer exampleVideoUrl --url https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+            installable_actions: Some(vec![BuzzerAction::Url(SAMPLE_VIDEO_URL.to_string())]),
         },
         ExampleBuzzer {
             name: "exampleUrl",

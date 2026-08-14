@@ -1,13 +1,10 @@
-use std::io::BufRead;
-use std::time::Duration;
-
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, TimeZone};
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
-use strangetimer_core::model::{RepeatMode, TimerStatus};
+use strangetimer_core::model::RepeatMode;
 
 use crate::cli::RunArgs;
-use crate::commands::{ensure_ok, send_and_receive, send_and_receive_no_autostart};
+use crate::commands::{ensure_ok, send_and_receive};
 use crate::style;
 
 /// `strangetimer run <name> [-n count | -i] [-t HH:MM] [-u]`
@@ -50,65 +47,27 @@ pub fn run(args: &RunArgs) -> Result<()> {
                 None => println!("Timer {} started.", style::name(&args.name)),
             }
             if args.user_interrupt {
+                // Non-blocking: the CLI returns immediately. The daemon
+                // pauses the run and loops audio at every buzzer until the
+                // acknowledgement arrives via `strangetimer resume`.
                 println!(
                     "{}",
                     style::dim(
-                        "user-interrupt on: the timer pauses at every buzzer until you press Enter"
+                        "user-interrupt on: the timer pauses at every buzzer until acknowledged"
                     )
                 );
-                attach_interrupt(&args.name)?;
+                println!(
+                    "{}",
+                    style::prompt(&format!(
+                        "When it pauses, acknowledge with: strangetimer resume {}",
+                        args.name
+                    ))
+                );
             }
             Ok(())
         }
         ServerMessage::Error(e) => Err(anyhow!(e)),
         other => Err(anyhow!("unexpected daemon response: {other:?}")),
-    }
-}
-
-/// Stay attached to a `run -u` timer: poll for the daemon's interrupt
-/// pending marker, prompt for Enter, and resume on input. Returns when the
-/// run is gone or completed; Ctrl+C just detaches (the run stays paused
-/// and `strangetimer resume <name>` remains the fallback).
-fn attach_interrupt(name: &str) -> Result<()> {
-    let stdin = std::io::stdin();
-    loop {
-        std::thread::sleep(Duration::from_millis(400));
-
-        // Poll with auto-start off: an attached run must never resurrect
-        // the daemon on its own.
-        let response = send_and_receive_no_autostart(&ClientMessage::GetTimer {
-            name: name.to_string(),
-        })?;
-        let (runs, pending) = match response {
-            ServerMessage::TimerDetail {
-                runs,
-                interrupt_pending,
-                ..
-            } => (runs, interrupt_pending),
-            ServerMessage::Error(e) => return Err(anyhow!(e)),
-            other => return Err(anyhow!("unexpected daemon response: {other:?}")),
-        };
-
-        match runs.first() {
-            None => return Ok(()), // run finished or was stopped
-            Some(run) if run.status == TimerStatus::Completed => return Ok(()),
-            Some(run)
-                if run.user_interrupt
-                    && pending.as_deref() == Some(name)
-                    && run.status == TimerStatus::Paused =>
-            {
-                eprintln!(
-                    "{}",
-                    style::prompt(&format!("⏸ {name} paused — press Enter to resume"))
-                );
-                let mut line = String::new();
-                stdin.lock().read_line(&mut line)?;
-                send_and_receive_no_autostart(&ClientMessage::Resume {
-                    name: name.to_string(),
-                })?;
-            }
-            _ => {}
-        }
     }
 }
 

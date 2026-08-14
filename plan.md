@@ -984,6 +984,116 @@ into plan.md as Prompts 31–35 + Build Order Summary update.
 
 ---
 
+---
+
+## Prompt 36 — View persistence and scrolling
+
+```
+Problem: the live view vanished when the user scrolled; arrow keys exited.
+
+- Keep live mode as the default (`strangetimer view timers`), but only
+  q / Escape / Ctrl+C exit; arrow keys and mouse scrolling are ignored.
+- The daemon snapshot is refetched every ~1s instead of animating one
+  stale snapshot forever.
+- On exit a final snapshot is printed to the primary screen so the
+  display persists in scrollback instead of disappearing.
+- New `--snapshot` flag prints a static, persistent view (no alternate
+  screen) — ideal for scripts and scrollback.
+- `view <timer> --snapshot` works the same way.
+- Help text updated with examples for both modes.
+```
+
+## Prompt 37 — Exact-width table renderer
+
+```
+Problem: rows were ~10 columns too wide and wrapped; ANSI codes shifted
+columns; the progress bar shared the details line; rules wrapped.
+
+- New display-width-aware layout: cells are truncated and padded on raw
+  text with `unicode-width`, styled only afterwards — ANSI never shifts
+  columns and no physical line exceeds the terminal width.
+- Column widths derived from the exact terminal width (overhead: borders
+  + " │ " separators); narrow terminals shrink columns proportionally.
+- Each active timer spans two rows: a details row (TIMER | STATUS |
+  START → END | NEXT) and a full-width progress-bar row on its own line.
+- Rules are a single full-width line; ACTIVE RUNS / INACTIVE TIMERS
+  section headers with a divider; PENDING (blinking in live mode) marks
+  user-interrupt runs; height-capped with "+N more".
+- Tests: rows never exceed 40/80/120/200 columns; pending marker;
+  inactive section; unicode truncation.
+```
+
+## Prompt 38 — Context-aware completions
+
+```
+Problem: `create timer t 1m<Tab>` only offered --help; resume didn't
+suggest paused timers.
+
+- Custom `ValueCompleter` with `complete_at` for the `create timer`
+  variadic: even tokens are offset slots (suggests 30s/1m/5m/…), odd
+  tokens are buzzer slots; a completed offset (`1m<Tab>`) expands to
+  `1m <buzzer>` instead of being replaced.
+- State-aware name sets: pause → running runs; resume → paused/pending
+  runs; stop → live runs; run/duplicate/delete/view → all definitions;
+  delete buzzer → non-builtin buzzers only.
+- Daemon-down fallback reads the persisted state files (no auto-start).
+- e2e drives the real bash script and asserts `1m myBuzzer` and paused
+  timer suggestions.
+```
+
+## Prompt 39 — Non-blocking user-interrupt mode
+
+```
+Problem: `run -u` held the terminal waiting for Enter.
+
+- `run -u` is fully detached: prints the acknowledge hint
+  (`strangetimer resume <name>`) and returns immediately.
+- `strangetimer resume <name>` is the only acknowledgement path; the live
+  view shows a blinking PENDING marker, snapshots a plain one.
+- Pending state generalized from a single `Option<String>` to
+  `pending_interrupts: Vec<String>` (legacy field migrated on load) so
+  several runs can pause independently.
+- Audio loops run in their own spawned tasks so one pending timer never
+  blocks another timer's dispatch (found and fixed via a live test).
+- Tests: detached CLI returns at once; PENDING marker; resume clears;
+  two concurrent `-u` runs pause and resume independently.
+```
+
+## Prompt 40 — Repeated video events and remote video
+
+```
+Problem: repeated `default_video` timers appeared to fire once.
+
+- Scheduler channel now carries structured `FireEvent`
+  (timer, buzzer, buzzer index, repetition); Count(3) fires exactly
+  three events (unit test asserts reps 0,1,2).
+- `elapsed_before_pause` is reset when a repetition advances, so pause
+  offsets never leak into later repetitions.
+- Opener seam: `STRANGETIMER_TEST_OPENER` records opens instead of
+  launching a GUI; e2e asserts three opens of `default.mp4`.
+- `default.mp4` resolves next to the installed binary
+  (`<exe_dir>/assets/default.mp4`) with a source-tree fallback; the
+  release workflow packages `assets/`; a test asserts a valid MP4 ftyp.
+- New `exampleVideoUrl` example streams a stable HTTPS MP4 via --url;
+  real network/GUI checks stay opt-in (`STRANGETIMER_GUI_TESTS=1`).
+```
+
+## Prompt 41 — Safe desktop-action tests
+
+```
+- External-tool seams: STRANGETIMER_TEST_PKILL / _WMCTRL / _XDOTOOL /
+  _OSASCRIPT / _TASKKILL replace the real binaries with recording
+  scripts, so close-app and focus-window command construction is tested
+  without touching the desktop.
+- e2e: application buzzer launches a temp script (no GUI needed); URL
+  buzzer opens its target through the mock opener; close-app issues
+  pkill for the named app; focus-window issues the platform command.
+- Real-GUI tests are `#[ignore]`d and opt in via STRANGETIMER_GUI_TESTS=1
+  (X11 focus); CI never runs them.
+```
+
+---
+
 ## Build Order Summary
 
 ```
@@ -1022,6 +1132,13 @@ Prompt 32  — Help overhaul with line-separated examples
 Prompt 33  — Muted Cosmic styling module + colored CLI/help
 Prompt 34  — `view timers` colored table (active/inactive)
 Prompt 35  — `run -u / --userinterrupt`
+── /compact ──
+Prompt 36  — View persistence & scrolling (`--snapshot`, q/Ctrl+C exit)
+Prompt 37  — Exact-width table renderer (progress on its own line)
+Prompt 38  — Context-aware completions (create-timer slots, state-aware)
+Prompt 39  — Non-blocking user-interrupt + multi-pending support
+Prompt 40  — FireEvent, repetition reset, mock opener, remote video
+Prompt 41  — Safe desktop-action test seams (PKILL/WMCTRL/... overrides)
 ```
 
-(Implemented in commit d02ab04-era order: 33 → 32 → 31 → 34 → 35.)
+(Implemented in one pass; prompts 36-41 shipped together.)

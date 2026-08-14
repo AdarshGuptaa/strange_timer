@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use interprocess::local_socket::traits::tokio::Listener as TokioListener;
 use strangetimer_core::ipc::socket_name;
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
-use strangetimer_core::model::{Buzzer, BuzzerAction, TimerStatus};
+use strangetimer_core::model::{Buzzer, BuzzerAction, FireEvent, TimerStatus};
 use strangetimer_core::persistence::{
     load_buzzers, load_state, load_timers, save_buzzers, save_state,
 };
@@ -63,9 +63,9 @@ async fn main() -> Result<()> {
     }
 
     // 4. Buzzer channel + scheduler + buzzer dispatcher tasks. The channel
-    //    carries (buzzer_name, timer_name) pairs — the run context matters
-    //    for `run -u` user-interrupt handling.
-    let (buzzer_tx, mut buzzer_rx) = mpsc::channel::<(String, String)>(100);
+    //    carries structured FireEvents — the run context and repetition
+    //    matter for `run -u` handling and for tests.
+    let (buzzer_tx, mut buzzer_rx) = mpsc::channel::<FireEvent>(100);
 
     let scheduler_state = Arc::clone(&app_state);
     let scheduler_tx = buzzer_tx.clone();
@@ -75,8 +75,8 @@ async fn main() -> Result<()> {
 
     let fire_state = Arc::clone(&app_state);
     tokio::spawn(async move {
-        while let Some((buzzer, timer)) = buzzer_rx.recv().await {
-            fire_buzzer(&buzzer, &timer, Arc::clone(&fire_state)).await;
+        while let Some(event) = buzzer_rx.recv().await {
+            fire_buzzer(&event, Arc::clone(&fire_state)).await;
         }
     });
 
@@ -143,7 +143,9 @@ fn builtin_buzzers() -> Vec<Buzzer> {
 /// paused and marked pending *before* the actions dispatch, audio actions
 /// loop until the acknowledgement (`resume`), and afterwards the terminal
 /// captured at run time is focused.
-async fn fire_buzzer(name: &str, timer_name: &str, state: Arc<AppState>) {
+async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
+    let name = &event.buzzer_name;
+    let timer_name = &event.timer_name;
     let Some(buzzer) = state.get_buzzer(name).await else {
         warn!("BUZZ: {name} — no such buzzer (was it deleted?)");
         return;
@@ -151,12 +153,12 @@ async fn fire_buzzer(name: &str, timer_name: &str, state: Arc<AppState>) {
 
     // A user-interrupt run that is already awaiting acknowledgement skips
     // further buzzers fired at the same moment (they were marked fired).
-    if state.interrupt_pending().await.as_deref() == Some(timer_name) {
+    if state.pending_contains(timer_name).await {
         info!("BUZZ: {name} — run {timer_name:?} is awaiting user interrupt; skipping");
         return;
     }
 
-    info!("BUZZ: {name}");
+    info!("BUZZ: {name} (rep {})", event.repetition);
 
     let run = state.get_run(timer_name).await;
     if run.as_ref().is_some_and(|r| r.user_interrupt) {
@@ -174,9 +176,9 @@ async fn fire_buzzer(name: &str, timer_name: &str, state: Arc<AppState>) {
 
 /// Fire alarms that became due while the daemon was stopped, and promote
 /// Scheduled runs whose start time has already passed.
-async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<(String, String)>) {
+async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<FireEvent>) {
     let now = chrono::Local::now();
-    let mut missed: Vec<(String, String)> = Vec::new();
+    let mut missed: Vec<FireEvent> = Vec::new();
     let mut state_changed = false;
 
     {
@@ -202,7 +204,12 @@ async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<(String, St
                         }
                         if elapsed >= buzzer_ref.offset {
                             run.fired_indices.push(idx);
-                            missed.push((buzzer_ref.buzzer_name.clone(), run.timer_name.clone()));
+                            missed.push(FireEvent {
+                                timer_name: run.timer_name.clone(),
+                                buzzer_name: buzzer_ref.buzzer_name.clone(),
+                                buzzer_index: idx,
+                                repetition: run.current_rep,
+                            });
                             state_changed = true;
                         }
                     }
@@ -227,9 +234,12 @@ async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<(String, St
     }
 
     // Fire missed alarms immediately — dispatch happens in the fire task.
-    for (name, timer_name) in missed {
-        info!("firing missed alarm for {name:?} ({timer_name:?}) from downtime");
-        if let Err(e) = buzzer_tx.send((name, timer_name)).await {
+    for event in missed {
+        info!(
+            "firing missed alarm for {:?} ({:?}) from downtime",
+            event.buzzer_name, event.timer_name
+        );
+        if let Err(e) = buzzer_tx.send(event).await {
             warn!("recovery buzzer channel error: {e}");
             break;
         }
@@ -384,7 +394,8 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             ServerMessage::TimerList {
                 timers: state.get_timers().await,
                 runs: state.lock().await.state.runs.clone(),
-                interrupt_pending: pending,
+                interrupt_pending: pending.first().cloned(),
+                pending_interrupts: pending,
             }
         }
         ClientMessage::GetTimer { name } => match state.get_timer(&name).await {
@@ -393,10 +404,12 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
                     Some(run) => vec![run],
                     None => Vec::new(),
                 };
+                let pending = state.interrupt_pending().await;
                 ServerMessage::TimerDetail {
                     timer,
                     runs,
-                    interrupt_pending: state.interrupt_pending().await,
+                    interrupt_pending: pending.first().cloned(),
+                    pending_interrupts: pending,
                 }
             }
             None => ServerMessage::Error(format!("no timer named {name:?}")),

@@ -200,18 +200,25 @@ pub enum Command {
     #[command(after_help = "Examples:\n\
     \n\
       strangetimer view timers\n\
+      strangetimer view timers --snapshot\n\
       strangetimer view buzzers\n\
       strangetimer view focus\n\
+      strangetimer view focus --snapshot\n\
     \n\
     `view timers` shows every live run (active section) plus defined timers\n\
-    without a run (inactive section) in a table; press any key to exit.\n\
-    Without a terminal it prints a static snapshot instead.")]
+    without a run (inactive section) in a table; press q or Ctrl+C to exit.\n\
+    By default it runs as a live dashboard; `--snapshot` prints a static,\n\
+    persistent view that stays in the terminal scrollback.")]
     View {
         /// `timers` for the live overview table, `buzzers` for the buzzer
         /// library, or a timer name for its progress block + countdown
         /// table.
         #[arg(add = ArgValueCompleter::new(candidates::view_targets))]
         name: String,
+        /// Print a static snapshot instead of the live dashboard; the
+        /// output stays in the terminal scrollback.
+        #[arg(long)]
+        snapshot: bool,
     },
 }
 
@@ -279,7 +286,7 @@ pub enum CreateKind {
             value_name = "OFFSET [BUZZER]",
             required = true,
             num_args = 1..,
-            add = ArgValueCompleter::new(candidates::timer_slot_buzzers)
+            add = ArgValueCompleter::new(candidates::CreateTimerCompleter)
         )]
         rest: Vec<String>,
     },
@@ -337,7 +344,7 @@ pub enum DeleteKind {
     \n\
     Built-in buzzers cannot be deleted.")]
     Buzzer {
-        #[arg(add = ArgValueCompleter::new(candidates::buzzer_names))]
+        #[arg(add = ArgValueCompleter::new(candidates::deletable_buzzer_names))]
         name: String,
     },
 }
@@ -356,27 +363,27 @@ pub struct RunArgs {
     #[arg(short = 't', long)]
     pub schedule_time: Option<String>,
     /// User-interrupt mode: the timer pauses at every buzzer and audio
-    /// buzzers loop until you press Enter; the CLI stays attached and
-    /// prompts you. `strangetimer resume <name>` acknowledges too.
+    /// buzzers loop until acknowledged with `strangetimer resume <name>`.
+    /// The CLI returns immediately after starting.
     #[arg(short = 'u', long)]
     pub user_interrupt: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct PauseTarget {
-    #[arg(add = ArgValueCompleter::new(candidates::timer_names))]
+    #[arg(add = ArgValueCompleter::new(candidates::running_timer_names))]
     pub name: String,
 }
 
 #[derive(Args, Debug)]
 pub struct ResumeTarget {
-    #[arg(add = ArgValueCompleter::new(candidates::timer_names))]
+    #[arg(add = ArgValueCompleter::new(candidates::paused_timer_names))]
     pub name: String,
 }
 
 #[derive(Args, Debug)]
 pub struct StopTarget {
-    #[arg(add = ArgValueCompleter::new(candidates::timer_names))]
+    #[arg(add = ArgValueCompleter::new(candidates::active_run_timer_names))]
     pub name: String,
 }
 

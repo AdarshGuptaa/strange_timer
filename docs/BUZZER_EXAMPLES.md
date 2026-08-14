@@ -15,6 +15,7 @@ daemon must be running (`strangetimer daemon start`).
 | `exampleAudio` | Built-in chime sound | `strangetimer create buzzer exampleAudio --audio` |
 | `exampleAudioFile` | Custom audio file | `strangetimer create buzzer exampleAudioFile --audio ~/Music/alert.wav` |
 | `exampleVideo` | Built-in default video | `strangetimer create buzzer exampleVideo --video` |
+| `exampleVideoUrl` | Video streamed from the internet (default player/browser) | `strangetimer create buzzer exampleVideoUrl --url https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4` |
 | `exampleUrl` | Open a URL in the browser | `strangetimer create buzzer exampleUrl --url https://github.com/AdarshGuptaa/strange_timer` |
 | `exampleApplication` | Launch an application | `strangetimer create buzzer exampleApplication --application /usr/bin/gnome-calculator` |
 | `exampleBash` | Run a shell script | `strangetimer create buzzer exampleBash --bash ~/notify.sh` |
@@ -29,7 +30,10 @@ daemon must be running (`strangetimer daemon start`).
   or pass a `.wav`/`.mp3` file. Plays on a background thread so the daemon
   never blocks.
 - **`--video`** — opens the video in your default player. Good for longer
-  attention-grabbing alerts, e.g. a "break is over" clip.
+  attention-grabbing alerts, e.g. a "break is over" clip. The built-in
+  `default_video` clip ships offline with the install (`assets/default.mp4`,
+  resolved next to the daemon binary); `exampleVideoUrl` shows the remote
+  alternative via `--url`.
 - **`--url`** — opens a page in the default browser. Useful for meeting
   links, dashboards, or a pomodoro wrap-up page.
 - **`--application`** — launches a program. Ideal for "time to run my

@@ -93,16 +93,21 @@ pub enum ServerMessage {
     TimerList {
         timers: Vec<Timer>,
         runs: Vec<TimerRun>,
-        /// Timer currently awaiting a user-interrupt acknowledgement
-        /// (`run -u`), if any.
+        /// Legacy single-pending marker (kept for older CLI binaries).
         #[serde(default)]
         interrupt_pending: Option<String>,
+        /// Timers currently awaiting a user-interrupt acknowledgement.
+        #[serde(default)]
+        pending_interrupts: Vec<String>,
     },
     TimerDetail {
         timer: Timer,
         runs: Vec<TimerRun>,
+        /// Legacy single-pending marker (kept for older CLI binaries).
         #[serde(default)]
         interrupt_pending: Option<String>,
+        #[serde(default)]
+        pending_interrupts: Vec<String>,
     },
     BuzzerList(Vec<Buzzer>),
     /// Reply to `ClientMessage::Ping`: the daemon's process id and version.
@@ -205,6 +210,7 @@ mod tests {
             },
             runs: vec![],
             interrupt_pending: None,
+            pending_interrupts: vec![],
         };
         let mut buf: Vec<u8> = Vec::new();
         write_message(&mut buf, &original).unwrap();

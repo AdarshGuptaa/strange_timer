@@ -520,14 +520,18 @@ captured `interrupt_focus` window; `TimerRun` persists both and
 `DaemonState::interrupt_pending` records the timer awaiting
 acknowledgement (serde defaults keep older state files readable).
 
-On a buzzer fire the fire task (which now receives `(buzzer, timer)`
-pairs over the scheduler channel) pauses the run via `begin_interrupt`,
-dispatches the actions — audio actions **loop** (`fire_audio_until`)
-until `resume` clears the pending marker, everything else fires once —
-and finally focuses the captured terminal window. The attached CLI polls
-`GetTimer` and prompts "press Enter to resume"; `strangetimer resume
-<name>` is the detached fallback and doubles as the acknowledgement. A
-restart keeps the run paused-pending without looping audio during
+On a buzzer fire the fire task (which now receives structured
+[`FireEvent`]s — timer, buzzer, buzzer index, repetition — over the
+scheduler channel) pauses the run via `begin_interrupt`, dispatches the
+actions — audio actions **loop** (`fire_audio_until`) until `resume`
+clears the pending marker, each loop in its own spawned task so one
+pending timer never blocks another — and finally focuses the captured
+terminal window. The CLI is **detached**: `run -u` prints the
+acknowledge hint and returns; `strangetimer resume <name>` is the
+acknowledgement path and the live view shows a blinking PENDING marker.
+`DaemonState::pending_interrupts: Vec<String>` supports several pending
+runs at once (the legacy `interrupt_pending` marker is migrated on
+load). A restart keeps runs paused-pending without looping audio during
 downtime.
 
 ### 8.5 Logging
@@ -597,11 +601,17 @@ ACTIVE RUNS
 │ focusTest  │ —         │ total 25m       │ 1 buzzer      │ —
 ```
 
-- **Active** rows are live runs sorted by next-buzzer time; **inactive**
-  rows are defined timers without a run, separated by a divider.
-- Column widths are derived from the terminal width each frame; cells
-  truncate with `…`; the bar is capped at 40 cells; below the table width
-  threshold everything collapses to a one-line-per-timer list.
+- **Active** rows are live runs sorted by next-buzzer time, each spanning
+  two physical lines — details, then a full-width progress bar on its own
+  line; **inactive** rows are defined timers without a live run.
+- Columns are sized from the exact terminal width; cells are truncated and
+  padded by display width (unicode-width) *before* styling, so ANSI codes
+  never shift columns and no line ever wraps.
+- `view timers` runs live by default: alternate screen, only q/Escape/
+  Ctrl+C exit (arrows and mouse scroll are ignored), the daemon snapshot
+  is refetched every ~1s, and a final snapshot is printed to the primary
+  screen on exit so the display persists in scrollback. `--snapshot`
+  prints a static, scrollable view.
 - Rows are capped to the terminal height with a "+N more" line.
 
 The table, buzzer library, command confirmations, prompts and help all

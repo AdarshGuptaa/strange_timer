@@ -98,6 +98,32 @@ COMP_WORDS=(strangetimer run ''); COMP_CWORD=2; _clap_complete_strangetimer ''
 echo "${COMPREPLY[*]}"
 ```
 
+### Table rendering and view modes
+
+`commands/view.rs` builds the overview as an exact-width table: cells are
+truncated and padded by *display* width (`unicode-width`) on raw text and
+only then styled, so ANSI codes never shift columns and no line wraps.
+Each active timer spans two physical rows — a details row and a progress
+row with the bar on its own line. `view timers` runs live by default
+(alternate screen; only `q`/`Escape`/`Ctrl+C` exit; arrow keys and mouse
+scrolling are ignored; the snapshot is refetched periodically; a final
+snapshot is printed to the primary screen on exit so the display stays in
+scrollback). `view timers --snapshot` prints a static, persistent view.
+
+### Test seams
+
+The daemon honours environment overrides that let tests exercise desktop
+side effects without touching the desktop:
+
+- `STRANGETIMER_TEST_OPENER` — binary run with the target as argv instead
+  of the system opener (URL/video tests).
+- `STRANGETIMER_TEST_PKILL`, `STRANGETIMER_TEST_WMCTRL`,
+  `STRANGETIMER_TEST_XDOTOOL`, `STRANGETIMER_TEST_OSASCRIPT`,
+  `STRANGETIMER_TEST_TASKKILL` — replace the external tool (recording
+  scripts assert command construction).
+- `STRANGETIMER_GUI_TESTS=1` opts into the `#[ignore]`d real-desktop
+  tests (focus, playback) — never run in CI.
+
 ### Colored output
 
 `src/style.rs` centralises the muted Cosmic-like theme. Color is off when
@@ -110,18 +136,22 @@ uses the same palette via clap `Styles` in `cli.rs`.
 The run captures the active terminal window (`xdotool`/`osascript`,
 best-effort), `RunTimer` carries `user_interrupt` + `interrupt_focus`, and
 `TimerRun`/`DaemonState` persist them (serde defaults keep old state
-files working). On a buzzer fire the daemon's fire task:
+files working; `pending_interrupts: Vec<String>` replaces the legacy
+single `interrupt_pending` marker, folded in on load). On a buzzer fire
+the daemon's fire task:
 
-1. `begin_interrupt` — pauses the run and sets the pending marker
+1. `begin_interrupt` — pauses the run and pushes it onto the pending list
    (`state.rs`), synchronously mirrored for background threads.
 2. dispatches actions: audio **loops** (`buzzers/audio.rs::fire_audio_until`)
-   until `resume` clears the marker; everything else fires once.
+   until `resume` clears the marker; each loop runs in its own spawned
+   task so one pending timer never blocks another's dispatch.
 3. focuses the captured terminal window afterwards.
 
-The attached CLI (`commands/control.rs::attach_interrupt`) polls
-`GetTimer`; when pending it prints the prompt and resumes on Enter.
-`strangetimer resume <name>` is the detached fallback; a daemon restart
-keeps the run paused-pending (no audio loops during downtime).
+The CLI is fully **detached**: `run -u` prints the acknowledge hint and
+returns immediately. `strangetimer resume <name>` is the only
+acknowledgement path; the live view shows a blinking PENDING marker. A
+daemon restart keeps runs paused-pending (no audio loops during
+downtime).
 
 ### Isolated instances (for testing / demos)
 

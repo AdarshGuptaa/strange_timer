@@ -92,6 +92,16 @@ pub enum TimerStatus {
     Completed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FireEvent {
+    pub timer_name: String,
+    pub buzzer_name: String,
+    /// Index of the buzzer within the timer's definition.
+    pub buzzer_index: usize,
+    /// Repetition (0-based) during which the buzzer fired.
+    pub repetition: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonState {
     pub runs: Vec<TimerRun>,
@@ -101,9 +111,14 @@ pub struct DaemonState {
     /// recovery (Prompt 20) to reason about downtime; updated automatically
     /// inside `persistence::save_state`.
     pub last_saved_at: Option<DateTime<Local>>,
-    /// Timer currently awaiting a user-interrupt acknowledgement
-    /// (`run -u`). Persisted so a restart keeps the run paused and the
-    /// attached CLI (or `resume`) can still acknowledge it.
+    /// Legacy single-pending marker from the pre-multi-interrupt format.
+    /// Kept so older state files still deserialize; folded into
+    /// `pending_interrupts` on load.
     #[serde(default)]
     pub interrupt_pending: Option<String>,
+    /// Timers currently awaiting a user-interrupt acknowledgement
+    /// (`run -u`). Persisted so a restart keeps the runs paused and
+    /// `resume` can still acknowledge them.
+    #[serde(default)]
+    pub pending_interrupts: Vec<String>,
 }

@@ -12,14 +12,18 @@ pub fn fire_focus_window(name: &str) {
     #[cfg(target_os = "macos")]
     {
         let script = format!("tell application \"{name}\" to activate");
-        if let Err(e) = Command::new("osascript").arg("-e").arg(&script).status() {
+        if let Err(e) = Command::new(crate::platform::tool("osascript"))
+            .arg("-e")
+            .arg(&script)
+            .status()
+        {
             warn!("focus_window {name:?} failed: {e}");
         }
     }
     #[cfg(target_os = "windows")]
     {
         let script = format!("(New-Object -ComObject WScript.Shell).AppActivate('{name}')");
-        if let Err(e) = Command::new("powershell")
+        if let Err(e) = Command::new(crate::platform::tool("powershell"))
             .args(["-NoProfile", "-Command"])
             .arg(&script)
             .status()
@@ -33,14 +37,16 @@ pub fn fire_focus_window(name: &str) {
 /// `xdotool search --name ... windowactivate`.
 #[cfg(target_os = "linux")]
 fn focus_linux(name: &str) -> anyhow::Result<()> {
-    let wmctrl = Command::new("wmctrl").args(["-a", name]).status();
+    let wmctrl = Command::new(crate::platform::tool("wmctrl"))
+        .args(["-a", name])
+        .status();
     if let Ok(status) = wmctrl {
         if status.success() {
             return Ok(());
         }
     }
 
-    let out = Command::new("xdotool")
+    let out = Command::new(crate::platform::tool("xdotool"))
         .args(["search", "--name", name])
         .output()?;
     if !out.status.success() {
@@ -52,7 +58,7 @@ fn focus_linux(name: &str) -> anyhow::Result<()> {
     }
     for id in String::from_utf8_lossy(&out.stdout).lines().map(str::trim) {
         if !id.is_empty() {
-            let _ = Command::new("xdotool")
+            let _ = Command::new(crate::platform::tool("xdotool"))
                 .args(["windowactivate", id])
                 .status();
         }

@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 clap = { workspace = true }
 clap_complete = { workspace = true }
+unicode-width = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -53,10 +53,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::InstallCompletions { shell } => {
             commands::install_completions::install_completions(shell)
         }
-        Command::View { name } => match name.as_str() {
-            "timers" => commands::view::view_timers(),
+        Command::View { name, snapshot } => match name.as_str() {
+            "timers" => commands::view::view_timers(snapshot),
             "buzzers" => commands::buzzers::view_buzzers(),
-            _ => commands::view::view_timer(&name),
+            _ => commands::view::view_timer(&name, snapshot),
         },
     }
 }

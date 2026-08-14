@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Local;
-use strangetimer_core::model::{RepeatMode, TimerStatus};
+use strangetimer_core::model::{FireEvent, RepeatMode, TimerStatus};
 use strangetimer_core::persistence::save_state;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{interval, Duration};
@@ -9,15 +9,14 @@ use tokio::time::{interval, Duration};
 use crate::state::AppState;
 
 /// Run the scheduler forever: every 500ms, advance all Running runs and
-/// forward any (buzzer_name, timer_name) pairs that became due to
-/// `buzzer_tx`.
-pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<(String, String)>) {
+/// forward any [`FireEvent`]s that became due to `buzzer_tx`.
+pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<FireEvent>) {
     let mut ticker = interval(Duration::from_millis(500));
     loop {
         ticker.tick().await;
         let fired = tick(Arc::clone(&state)).await;
-        for (buzzer, timer) in fired {
-            if buzzer_tx.send((buzzer, timer)).await.is_err() {
+        for event in fired {
+            if buzzer_tx.send(event).await.is_err() {
                 return; // receiver gone; nothing left to do
             }
         }
@@ -26,11 +25,11 @@ pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<(String, Stri
 
 /// Advance the state by one scheduler pass.
 ///
-/// Returns the (buzzer_name, timer_name) pairs whose fire_time has passed
-/// in this pass (in index order). Extracted from the loop so unit tests can
-/// drive the scheduler deterministically.
-pub async fn tick(state: Arc<AppState>) -> Vec<(String, String)> {
-    let mut fired_this_tick: Vec<(String, String)> = Vec::new();
+/// Returns the [`FireEvent`]s whose fire_time has passed in this pass (in
+/// index order). Extracted from the loop so unit tests can drive the
+/// scheduler deterministically.
+pub async fn tick(state: Arc<AppState>) -> Vec<FireEvent> {
+    let mut fired_this_tick: Vec<FireEvent> = Vec::new();
     let mut state_changed = false;
 
     let mut inner = state.lock().await;
@@ -71,23 +70,31 @@ pub async fn tick(state: Arc<AppState>) -> Vec<(String, String)> {
             let fire_time = run.started_at + run.elapsed_before_pause + buzzer_ref.offset;
             if now >= fire_time {
                 run.fired_indices.push(idx);
-                fired_now.push((buzzer_ref.buzzer_name.clone(), timer_name.clone()));
+                fired_now.push(FireEvent {
+                    timer_name: timer_name.clone(),
+                    buzzer_name: buzzer_ref.buzzer_name.clone(),
+                    buzzer_index: idx,
+                    repetition: run.current_rep,
+                });
             }
         }
 
         // When every buzzer of the current repetition has fired, advance to
-        // the next repetition or complete the run.
+        // the next repetition or complete the run. `elapsed_before_pause`
+        // is reset so pause offsets never leak into later repetitions.
         if run.fired_indices.len() == timer.buzzers.len() {
             match run.repetitions {
                 RepeatMode::Count(count) if run.current_rep + 1 < count => {
                     run.current_rep += 1;
                     run.fired_indices.clear();
                     run.started_at = now;
+                    run.elapsed_before_pause = chrono::Duration::zero();
                 }
                 RepeatMode::Infinite => {
                     run.current_rep += 1;
                     run.fired_indices.clear();
                     run.started_at = now;
+                    run.elapsed_before_pause = chrono::Duration::zero();
                 }
                 _ => {
                     run.status = TimerStatus::Completed;
@@ -140,6 +147,7 @@ mod tests {
                 registered: true,
                 last_saved_at: None,
                 interrupt_pending: None,
+                pending_interrupts: Vec::new(),
             },
         ))
     }
@@ -188,7 +196,9 @@ mod tests {
             vec![run("t", TimerStatus::Running, 10, 0, &[])],
         );
         let fired = tick(Arc::clone(&s)).await;
-        assert_eq!(fired, vec![("buzz".to_string(), "t".to_string())]);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].buzzer_name, "buzz");
+        assert_eq!(fired[0].timer_name, "t");
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.fired_indices, vec![0]);
         assert_eq!(run.status, TimerStatus::Running);
@@ -201,7 +211,9 @@ mod tests {
             vec![run("t", TimerStatus::Running, 10, 0, &[])],
         );
         let fired = tick(Arc::clone(&s)).await;
-        assert_eq!(fired, vec![("buzz".to_string(), "t".to_string())]);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].buzzer_name, "buzz");
+        assert_eq!(fired[0].timer_name, "t");
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.status, TimerStatus::Completed);
     }
@@ -239,6 +251,45 @@ mod tests {
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.current_rep, 1);
         assert_eq!(run.status, TimerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn count_run_fires_one_event_per_repetition() {
+        // A Count(3) timer whose 1s buzzer fires on every tick: across
+        // enough ticks it must fire exactly three events, one per
+        // repetition, with increasing repetition numbers.
+        let mut run = run("t", TimerStatus::Running, 100, 0, &[]);
+        run.repetitions = RepeatMode::Count(3);
+        let s = state_with(vec![timer_with_offsets("t", &[0])], vec![run]);
+        let mut events = Vec::new();
+        for _ in 0..12 {
+            let fired = tick(Arc::clone(&s)).await;
+            events.extend(fired);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            events.len(),
+            3,
+            "expected three fire events, got {events:?}"
+        );
+        let reps: Vec<u32> = events.iter().map(|e| e.repetition).collect();
+        assert_eq!(reps, vec![0, 1, 2], "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn repetition_advance_resets_pause_shift() {
+        let mut run = run("t", TimerStatus::Running, 100, 0, &[]);
+        run.repetitions = RepeatMode::Count(2);
+        run.elapsed_before_pause = chrono::Duration::seconds(90);
+        let s = state_with(vec![timer_with_offsets("t", &[0])], vec![run]);
+        tick(Arc::clone(&s)).await;
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.current_rep, 1);
+        assert_eq!(
+            run.elapsed_before_pause,
+            chrono::Duration::zero(),
+            "pause offset must not leak into the next repetition"
+        );
     }
 
     #[tokio::test]
@@ -286,7 +337,8 @@ mod tests {
             vec![run("t", TimerStatus::Running, 10, 0, &[])],
         );
         let fired = tick(Arc::clone(&s)).await;
-        assert_eq!(fired, vec![("buzz".to_string(), "t".to_string()); 2]);
+        assert_eq!(fired.len(), 2);
+        assert!(fired.iter().all(|e| e.buzzer_name == "buzz"));
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.fired_indices, vec![0, 1]);
     }

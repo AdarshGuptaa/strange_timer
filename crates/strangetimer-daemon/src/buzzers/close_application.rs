@@ -45,11 +45,15 @@ pub fn fire_close_application(name: &str) {
 /// command-line match (`pkill -f`) for names that are not the process name.
 #[cfg(target_os = "linux")]
 fn close_linux(name: &str) -> anyhow::Result<()> {
-    let exact = Command::new("pkill").args(["-x", name]).status()?;
+    let exact = Command::new(crate::platform::tool("pkill"))
+        .args(["-x", name])
+        .status()?;
     if exact.success() {
         return Ok(());
     }
-    let full = Command::new("pkill").args(["-f", name]).status()?;
+    let full = Command::new(crate::platform::tool("pkill"))
+        .args(["-f", name])
+        .status()?;
     if full.success() {
         Ok(())
     } else {
@@ -60,6 +64,8 @@ fn close_linux(name: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn pkill_exact(name: &str) -> anyhow::Result<()> {
-    Command::new("pkill").args(["-x", name]).status()?;
+    Command::new(crate::platform::tool("pkill"))
+        .args(["-x", name])
+        .status()?;
     Ok(())
 }

@@ -57,18 +57,32 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
 /// has already been paused and marked pending by `begin_interrupt`.
 ///
 /// - Audio actions **loop** until the acknowledgement arrives (`resume`
-///   clears the pending marker), replaying roughly once per playback.
+///   clears the pending marker), replaying roughly once per playback. Each
+///   loop runs in its own task so a waiting interrupt never blocks the
+///   dispatch of other timers.
 /// - All other actions fire once, as usual.
 /// - After every action, the terminal window captured at run time is
 ///   focused so the user lands back on the CLI prompt.
-pub async fn dispatch_interrupt(state: &AppState, actions: &[BuzzerAction], timer_name: &str) {
+pub async fn dispatch_interrupt(
+    state: &std::sync::Arc<AppState>,
+    actions: &[BuzzerAction],
+    timer_name: &str,
+) {
     for action in actions {
         match action {
-            BuzzerAction::DefaultAudio => {
-                audio::fire_audio_until(None, || pending_is(state, timer_name)).await
-            }
-            BuzzerAction::Audio(path) => {
-                audio::fire_audio_until(path.as_deref(), || pending_is(state, timer_name)).await
+            BuzzerAction::DefaultAudio | BuzzerAction::Audio(_) => {
+                let state = std::sync::Arc::clone(state);
+                let timer_name = timer_name.to_string();
+                let path = match action {
+                    BuzzerAction::Audio(p) => p.as_deref().map(std::path::PathBuf::from),
+                    _ => None,
+                };
+                tokio::spawn(async move {
+                    audio::fire_audio_until(path.as_deref(), move || {
+                        pending_is(&state, &timer_name)
+                    })
+                    .await;
+                });
             }
             _ => dispatch(state, action).await,
         }
@@ -87,8 +101,8 @@ pub async fn dispatch_interrupt(state: &AppState, actions: &[BuzzerAction], time
 
 /// Whether `timer_name` is still awaiting the interrupt acknowledgement.
 fn pending_is(state: &AppState, timer_name: &str) -> bool {
-    match state.interrupt_pending_sync() {
-        Some(pending) => pending == timer_name,
-        None => false,
-    }
+    state
+        .interrupt_pending_sync()
+        .iter()
+        .any(|p| p == timer_name)
 }

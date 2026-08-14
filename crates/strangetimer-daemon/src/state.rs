@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 /// persists the affected collection to disk before returning.
 pub struct AppState {
     inner: Mutex<StateInner>,
-    /// Synchronous mirror of `DaemonState::interrupt_pending`, readable from
-    /// background threads (the looping audio playback) without async.
-    pending: std::sync::Mutex<Option<String>>,
+    /// Synchronous mirror of `DaemonState::pending_interrupts`, readable
+    /// from background threads (the looping audio playback) without async.
+    pending: std::sync::Mutex<Vec<String>>,
 }
 
 pub struct StateInner {
@@ -32,7 +32,7 @@ impl AppState {
                 state,
                 close_windows_confirmed: false,
             }),
-            pending: std::sync::Mutex::new(None),
+            pending: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -210,10 +210,11 @@ impl AppState {
     pub async fn remove_run(&self, timer_name: &str) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.state.runs.retain(|r| r.timer_name != timer_name);
-        if inner.state.interrupt_pending.as_deref() == Some(timer_name) {
-            inner.state.interrupt_pending = None;
-            *self.pending.lock().expect("pending lock") = None;
-        }
+        inner.state.pending_interrupts.retain(|p| p != timer_name);
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .retain(|p| p != timer_name);
         save_state(&inner.state)?;
         Ok(())
     }
@@ -303,10 +304,11 @@ impl AppState {
 
         // Resume doubles as the user-interrupt acknowledgement: clear the
         // pending marker so any looping audio stops.
-        if inner.state.interrupt_pending.as_deref() == Some(timer_name) {
-            inner.state.interrupt_pending = None;
-            *self.pending.lock().expect("pending lock") = None;
-        }
+        inner.state.pending_interrupts.retain(|p| p != timer_name);
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .retain(|p| p != timer_name);
 
         save_state(&inner.state)?;
         Ok(())
@@ -316,8 +318,8 @@ impl AppState {
         let mut inner = self.inner.lock().await;
         if !inner.state.runs.is_empty() {
             inner.state.runs.clear();
-            inner.state.interrupt_pending = None;
-            *self.pending.lock().expect("pending lock") = None;
+            inner.state.pending_interrupts.clear();
+            self.pending.lock().expect("pending lock").clear();
             save_state(&inner.state)?;
         }
         Ok(())
@@ -353,12 +355,6 @@ impl AppState {
 
     // --- User-interrupt (`run -u`) ---
 
-    /// The timer currently awaiting a user-interrupt acknowledgement.
-    pub async fn interrupt_pending(&self) -> Option<String> {
-        let inner = self.inner.lock().await;
-        inner.state.interrupt_pending.clone()
-    }
-
     /// Pause the run and mark it as awaiting acknowledgement. Called before
     /// the buzzer actions dispatch, so a `resume` arriving mid-dispatch
     /// clears the marker and stops any looping audio.
@@ -373,14 +369,39 @@ impl AppState {
 
         run.status = TimerStatus::Paused;
         run.paused_at = Some(Local::now());
-        inner.state.interrupt_pending = Some(timer_name.to_string());
-        *self.pending.lock().expect("pending lock") = Some(timer_name.to_string());
+        if !inner
+            .state
+            .pending_interrupts
+            .iter()
+            .any(|p| p == timer_name)
+        {
+            inner.state.pending_interrupts.push(timer_name.to_string());
+        }
+        let mut pending = self.pending.lock().expect("pending lock");
+        if !pending.iter().any(|p| p == timer_name) {
+            pending.push(timer_name.to_string());
+        }
+        drop(pending);
         save_state(&inner.state)?;
         Ok(())
     }
 
+    /// Timers awaiting a user-interrupt acknowledgement.
+    pub async fn interrupt_pending(&self) -> Vec<String> {
+        let inner = self.inner.lock().await;
+        inner.state.pending_interrupts.clone()
+    }
+
+    /// Whether `timer_name` is currently awaiting acknowledgement.
+    pub async fn pending_contains(&self, timer_name: &str) -> bool {
+        self.interrupt_pending()
+            .await
+            .iter()
+            .any(|p| p == timer_name)
+    }
+
     /// Synchronous pending query for background threads (looping audio).
-    pub fn interrupt_pending_sync(&self) -> Option<String> {
+    pub fn interrupt_pending_sync(&self) -> Vec<String> {
         self.pending.lock().expect("pending lock").clone()
     }
 }
@@ -592,18 +613,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(s.interrupt_pending().await, None);
+        assert!(s.interrupt_pending().await.is_empty());
         s.begin_interrupt("t").await.unwrap();
 
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.status, TimerStatus::Paused);
-        assert_eq!(s.interrupt_pending().await.as_deref(), Some("t"));
-        assert_eq!(s.interrupt_pending_sync().as_deref(), Some("t"));
+        assert_eq!(s.interrupt_pending().await, vec!["t".to_string()]);
+        assert_eq!(s.interrupt_pending_sync(), vec!["t".to_string()]);
+        assert!(s.pending_contains("t").await);
 
         // Resume doubles as the acknowledgement.
         s.resume_run("t").await.unwrap();
-        assert_eq!(s.interrupt_pending().await, None);
-        assert_eq!(s.interrupt_pending_sync(), None);
+        assert!(s.interrupt_pending().await.is_empty());
+        assert!(s.interrupt_pending_sync().is_empty());
+        assert!(!s.pending_contains("t").await);
         assert_eq!(s.get_run("t").await.unwrap().status, TimerStatus::Running);
     }
 
@@ -617,13 +640,13 @@ mod tests {
         s.begin_interrupt("t").await.unwrap();
 
         s.remove_run("t").await.unwrap();
-        assert_eq!(s.interrupt_pending().await, None);
+        assert!(s.interrupt_pending().await.is_empty());
 
         s.start_run("t", RepeatMode::Count(1), None, true, None)
             .await
             .unwrap();
         s.begin_interrupt("t").await.unwrap();
         s.stop_all().await.unwrap();
-        assert_eq!(s.interrupt_pending().await, None);
+        assert!(s.interrupt_pending().await.is_empty());
     }
 }

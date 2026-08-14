@@ -55,6 +55,20 @@ pub fn prompt(s: &str) -> String {
     paint(s, Color::Green, true)
 }
 
+/// A blinking emphasis — used for the PENDING user-interrupt marker in the
+/// live view. Callers decide when blinking is appropriate (the snapshot
+/// view uses the plain text).
+pub fn blink(s: &str) -> String {
+    if !color_enabled() {
+        return s.to_string();
+    }
+    use crossterm::style::{Attribute, SetAttribute};
+    let mut out = SetAttribute(Attribute::SlowBlink).to_string();
+    out.push_str(s);
+    out.push_str(&SetAttribute(Attribute::Reset).to_string());
+    out
+}
+
 /// Dimmed text (DarkGrey) — secondary info.
 pub fn dim(s: &str) -> String {
     paint(s, Color::DarkGrey, false)

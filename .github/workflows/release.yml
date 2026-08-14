@@ -72,6 +72,7 @@ jobs:
         run: |
           cp ./target/release/strangetimer dist/
           cp ./target/release/strangetimer-daemon dist/
+          cp -r ./crates/strangetimer-daemon/assets dist/
           cp ./LICENSE dist/
           cp ./README.md dist/
           if [ "${{ matrix.os }}" = "windows-latest" ]; then

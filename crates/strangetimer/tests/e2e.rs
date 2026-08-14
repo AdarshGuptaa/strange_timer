@@ -4,7 +4,7 @@
 //! Run with `cargo test --workspace` (builds every binary first).
 
 use std::fs;
-use std::io::{BufRead, Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -48,11 +48,21 @@ struct DaemonGuard {
 
 impl DaemonGuard {
     fn start(env: TestEnv) -> DaemonGuard {
+        Self::start_with(env, &[])
+    }
+
+    /// Like [`start`] but with extra environment variables for the daemon
+    /// (e.g. `STRANGETIMER_TEST_OPENER` seams).
+    fn start_with(env: TestEnv, extra_env: &[(&str, &str)]) -> DaemonGuard {
         env.pre_seed_registered();
         let log = env.dir.join("daemon.log");
-        let child = Command::new(daemon_binary())
-            .env("STRANGETIMER_DATA_DIR", &env.dir)
-            .env("STRANGETIMER_SOCKET", &env.socket)
+        let mut cmd = Command::new(daemon_binary());
+        cmd.env("STRANGETIMER_DATA_DIR", &env.dir)
+            .env("STRANGETIMER_SOCKET", &env.socket);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let child = cmd
             .stdout(Stdio::from(fs::File::create(&log).unwrap()))
             .stderr(Stdio::from(fs::File::create(&log).unwrap()))
             .spawn()
@@ -211,7 +221,9 @@ fn view_timers_shows_active_runs_only() {
 
     expect_success(&guard, &["stop", "t"]);
     let out = expect_success(&guard, &["view", "timers"]);
-    assert!(out.contains("No timers currently running."));
+    // The definition remains, listed in the inactive section.
+    assert!(out.contains("INACTIVE TIMERS"), "{out}");
+    assert!(out.contains("unused"), "{out}");
 }
 
 #[test]
@@ -556,65 +568,336 @@ fn stop_does_not_auto_start() {
     let _ = fs::remove_dir_all(&env.dir);
 }
 
-/// `run -u` (user-interrupt): the run pauses at the buzzer, the attached
-/// CLI prompts, and Enter resumes it (which also stops any looping audio).
+/// `run -u` (user-interrupt) is non-blocking: the CLI returns immediately,
+/// the run pauses at the buzzer with a PENDING marker, and `resume`
+/// acknowledges it (which also stops the looping audio).
 #[test]
-fn user_interrupt_pauses_and_resumes_on_enter() {
+fn user_interrupt_detaches_and_resume_acknowledges() {
     let guard = DaemonGuard::start(TestEnv::new("user-interrupt"));
     expect_success(&guard, &["create", "timer", "t", "2s"]);
 
-    // Spawn `run t -u` with a piped stdin so the test can "press Enter".
-    let mut child = Command::new(cli_binary())
+    // `run t -u` must return immediately (no stdin interaction needed).
+    let out = expect_success(&guard, &["run", "t", "-u"]);
+    assert!(
+        out.contains("resume t"),
+        "expected acknowledge hint:\n{out}"
+    );
+    assert!(
+        !out.contains("press Enter"),
+        "must not block on Enter:\n{out}"
+    );
+
+    // After the 2s buzzer the run pauses and shows the PENDING marker.
+    std::thread::sleep(Duration::from_secs(4));
+    let out = expect_success(&guard, &["view", "timers"]);
+    assert!(out.contains("PENDING"), "run should show PENDING:\n{out}");
+
+    // `strangetimer resume t` acknowledges; the timer then completes.
+    expect_success(&guard, &["resume", "t"]);
+    std::thread::sleep(Duration::from_secs(2));
+    let out = expect_success(&guard, &["view", "timers"]);
+    assert!(
+        out.contains("INACTIVE TIMERS"),
+        "run should have completed:\n{out}"
+    );
+    assert!(!out.contains("PENDING"), "{out}");
+}
+
+/// Two concurrent `-u` runs pause independently: one `resume` must not
+/// affect the other, and neither's audio loop may block the other's
+/// dispatch.
+#[test]
+fn multiple_pending_interrupts_are_independent() {
+    let guard = DaemonGuard::start(TestEnv::new("multi-interrupt"));
+    expect_success(&guard, &["create", "timer", "a", "2s"]);
+    expect_success(&guard, &["create", "timer", "b", "2s"]);
+    expect_success(&guard, &["run", "a", "-u"]);
+    expect_success(&guard, &["run", "b", "-u"]);
+
+    // Both buzzers fire and both runs pause with a PENDING marker.
+    std::thread::sleep(Duration::from_secs(5));
+    let out = expect_success(&guard, &["view", "timers"]);
+    assert_eq!(
+        out.matches("PENDING").count(),
+        2,
+        "both should be pending:\n{out}"
+    );
+
+    // Acknowledging `a` clears only `a`; `b` stays pending.
+    expect_success(&guard, &["resume", "a"]);
+    std::thread::sleep(Duration::from_secs(1));
+    let out = expect_success(&guard, &["view", "timers"]);
+    assert_eq!(
+        out.matches("PENDING").count(),
+        1,
+        "only b should remain:\n{out}"
+    );
+
+    expect_success(&guard, &["resume", "b"]);
+}
+
+/// The generated bash completion suggests buzzers after a completed offset
+/// in `create timer`, and state-aware names for `resume`.
+#[test]
+fn bash_completion_suggests_buzzers_and_paused_timers() {
+    let guard = DaemonGuard::start(TestEnv::new("completion-suggest"));
+    expect_success(&guard, &["create", "timer", "focus", "25min"]);
+    expect_success(&guard, &["create", "buzzer", "myBuzzer", "--audio"]);
+    expect_success(&guard, &["run", "focus"]);
+    std::thread::sleep(Duration::from_millis(600));
+    expect_success(&guard, &["pause", "focus"]);
+
+    // Source the real engine script, then drive completions the way bash
+    // does, using the isolated socket/data dir.
+    let script = Command::new(cli_binary())
         .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
         .env("STRANGETIMER_SOCKET", &guard.env.socket)
-        .args(["run", "t", "-u"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn CLI");
+        .env("COMPLETE", "bash")
+        .output()
+        .unwrap();
+    assert!(script.status.success());
 
-    // Wait for the interrupt prompt (the 2s buzzer fires quickly).
-    let stderr = child.stderr.take().unwrap();
-    let mut reader = std::io::BufReader::new(stderr);
-    let mut line = String::new();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).expect("read CLI stderr");
-        assert!(read > 0, "CLI exited before prompting");
-        if line.contains("press Enter to resume") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no interrupt prompt within 15s; last line: {line}"
+    let run_bash = |words: &str, cword: usize, cur: &str| {
+        let code = format!(
+            "source /dev/stdin <<'SCRIPT'\n{script}\nSCRIPT\n\
+             COMP_WORDS=({words}); COMP_CWORD={cword}; COMP_TYPE=63\n\
+             _clap_complete_strangetimer '{cur}' '{cur}'\n\
+             printf '%s\\n' \"${{COMPREPLY[*]}}\"",
+            script = String::from_utf8_lossy(&script.stdout),
         );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&code)
+            .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
+            .env("STRANGETIMER_SOCKET", &guard.env.socket)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // `create timer x 1m<Tab>` → suggests `1m <buzzer>`.
+    let out = run_bash("strangetimer create timer x 1m", 4, "1m");
+    assert!(
+        out.contains("1m myBuzzer"),
+        "expected buzzer suggestion after offset:\n{out}"
+    );
+
+    // `resume ''<Tab>` → suggests the paused timer only.
+    let out = run_bash("strangetimer resume ''", 2, "");
+    assert!(out.contains("focus"), "expected paused timer:\n{out}");
+
+    // `resume <Tab>` with nothing paused is empty.
+    expect_success(&guard, &["resume", "focus"]);
+    let out = run_bash("strangetimer resume ''", 2, "");
+    assert!(!out.contains("focus"), "{out}");
+}
+
+/// Helper: write an executable recording script that appends its arguments
+/// to `log_file`.
+fn recording_script(log_file: &std::path::Path, extra: &str) -> PathBuf {
+    let path = log_file.with_extension("sh");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{log}\"\n{extra}\n",
+            log = log_file.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    assert!(line.contains("press Enter"), "{line}");
+    path
+}
 
-    // The run is paused while awaiting acknowledgement (STATUS column).
-    let out = expect_success(&guard, &["view", "timers"]);
-    assert!(out.contains("paused"), "run should be paused:\n{out}");
+/// A `-n 3` timer using the built-in video fires exactly three times —
+/// verified through the mock opener seam, so no media player is launched.
+#[test]
+fn default_video_fires_once_per_repetition() {
+    let env = TestEnv::new("video-repeat");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
 
-    // "Press Enter" → resume; the run then completes and the CLI exits.
-    child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut status = None;
+    expect_success(&guard, &["create", "timer", "v", "1s", "default_video"]);
+    expect_success(&guard, &["run", "v", "-n", "3"]);
+
+    // Three repetitions at 1s each, plus scheduler slack.
+    let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
-        if let Some(s) = child.try_wait().unwrap() {
-            status = Some(s);
+        if fs::read_to_string(&opens)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+            >= 3
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let status = match status {
-        Some(s) => s,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("CLI did not exit after Enter within 15s");
+    let log = fs::read_to_string(&opens).unwrap_or_default();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 3, "expected 3 opens, got:\n{log}");
+    assert!(
+        lines.iter().all(|l| l.ends_with("default.mp4")),
+        "every open must target the built-in clip:\n{log}"
+    );
+}
+
+/// A URL buzzer opens its target through the default opener (mock-recorded).
+#[test]
+fn url_buzzer_opens_target() {
+    let env = TestEnv::new("url-open");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
+
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "web",
+            "--url",
+            "https://example.com/alarm",
+        ],
+    );
+    expect_success(&guard, &["create", "timer", "u", "1s", "web"]);
+    expect_success(&guard, &["run", "u"]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&opens)
+            .map(|s| s.contains("https://example.com/alarm"))
+            .unwrap_or(false)
+        {
+            break;
         }
-    };
-    assert!(status.success(), "CLI exited with {status:?}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&opens).unwrap_or_default();
+    assert!(log.contains("https://example.com/alarm"), "{log}");
+}
+
+/// An `--application` buzzer really launches the given program (a temp
+/// script that records its own execution).
+#[test]
+fn application_buzzer_launches_program() {
+    let guard = DaemonGuard::start(TestEnv::new("app-launch"));
+    let ran = guard.env.dir.join("ran.log");
+    let app = recording_script(&ran, "");
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "app",
+            "--application",
+            app.to_str().unwrap(),
+        ],
+    );
+    expect_success(&guard, &["create", "timer", "a", "1s", "app"]);
+    expect_success(&guard, &["run", "a"]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if ran.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(ran.exists(), "application was never launched");
+}
+
+/// `--close-app` issues a pkill against the named app — verified through
+/// the STRANGETIMER_TEST_PKILL seam, never against real processes.
+#[test]
+fn close_app_issues_pkill_for_named_app() {
+    let env = TestEnv::new("close-app");
+    let kills = env.dir.join("kills.log");
+    let pkill = recording_script(&kills, "");
+    let guard =
+        DaemonGuard::start_with(env, &[("STRANGETIMER_TEST_PKILL", pkill.to_str().unwrap())]);
+
+    expect_success(&guard, &["confirm-destructive"]);
+    expect_success(
+        &guard,
+        &["create", "buzzer", "quit", "--close-app", "fakebrowser"],
+    );
+    expect_success(&guard, &["create", "timer", "c", "1s", "quit"]);
+    expect_success(&guard, &["run", "c"]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&kills)
+            .map(|s| s.contains("fakebrowser"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&kills).unwrap_or_default();
+    assert!(log.contains("fakebrowser"), "{log}");
+}
+
+/// `--focus-window` issues the platform focus command — verified through
+/// the wmctrl seam (no real window is touched).
+#[test]
+fn focus_window_issues_focus_command() {
+    let env = TestEnv::new("focus-cmd");
+    let focus_log = env.dir.join("focus.log");
+    let wmctrl = recording_script(&focus_log, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_WMCTRL", wmctrl.to_str().unwrap())],
+    );
+
+    expect_success(
+        &guard,
+        &["create", "buzzer", "chat", "--focus-window", "Slack"],
+    );
+    expect_success(&guard, &["create", "timer", "f", "1s", "chat"]);
+    expect_success(&guard, &["run", "f"]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&focus_log)
+            .map(|s| s.contains("Slack"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&focus_log).unwrap_or_default();
+    assert!(log.contains("Slack"), "{log}");
+}
+
+/// Opt-in real GUI check (X11 only): a focus buzzer really brings a window
+/// forward. Run with `STRANGETIMER_GUI_TESTS=1` on a desktop session.
+#[test]
+#[ignore = "requires a desktop session; opt in with STRANGETIMER_GUI_TESTS=1"]
+fn gui_focus_restores_terminal() {
+    if std::env::var("STRANGETIMER_GUI_TESTS").as_deref() != Ok("1") {
+        return;
+    }
+    // Requires xdotool on an X11 session. Focus a window we created.
+    let win = Command::new("xdotool")
+        .args(["search", "--name", "xterm"])
+        .output()
+        .expect("xdotool required for GUI test");
+    assert!(win.status.success(), "no matching window found");
 }
