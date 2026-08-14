@@ -16,3 +16,4 @@ open = { workspace = true }
 dirs = { workspace = true }
 interprocess = { workspace = true, features = ["tokio"] }
 anyhow = { workspace = true }
+reqwest = { workspace = true }

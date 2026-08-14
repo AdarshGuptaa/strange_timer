@@ -18,7 +18,15 @@ const STATE_FILE: &str = "state.json";
 /// | Linux   | `~/.local/share/strangetimer/`                     |
 /// | macOS   | `~/Library/Application Support/strangetimer/`     |
 /// | Windows | `%APPDATA%\strangetimer\`                          |
+///
+/// The `STRANGETIMER_DATA_DIR` environment variable overrides the location
+/// (used by the test-suite to isolate runs into a temp directory).
 pub fn data_dir() -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("STRANGETIMER_DATA_DIR") {
+        let dir = PathBuf::from(override_dir);
+        let _ = fs::create_dir_all(&dir);
+        return dir;
+    }
     let dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("strangetimer");
@@ -48,7 +56,11 @@ pub fn load_state() -> Result<DaemonState> {
 }
 
 pub fn save_state(s: &DaemonState) -> Result<()> {
-    write_json_atomic(&data_dir().join(STATE_FILE), s)
+    let mut stamped = s.clone();
+    // Keep a record of when the state was last written so restart recovery
+    // can reason about daemon downtime.
+    stamped.last_saved_at = Some(chrono::Local::now());
+    write_json_atomic(&data_dir().join(STATE_FILE), &stamped)
 }
 
 /// Read JSON from `path`. If the file is absent, return `default()`.

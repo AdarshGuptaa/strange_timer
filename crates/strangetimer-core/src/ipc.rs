@@ -18,6 +18,12 @@ pub const SOCKET_NAME: &str = if cfg!(windows) {
     "/tmp/strangetimer.sock"
 };
 
+/// Resolve the IPC endpoint name, honouring the `STRANGETIMER_SOCKET`
+/// environment override (used by the test-suite to run isolated daemons).
+pub fn socket_name() -> String {
+    std::env::var("STRANGETIMER_SOCKET").unwrap_or_else(|_| SOCKET_NAME.to_string())
+}
+
 /// Commands sent from the CLI to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -58,6 +64,9 @@ pub enum ClientMessage {
         name: String,
     },
     GetBuzzers,
+    /// Opt-in acknowledgement that the `close_windows` buzzer is allowed to
+    /// close all other windows. Guarded by `state.close_windows_confirmed`.
+    ConfirmDestructive,
 }
 
 /// Responses sent from the daemon to the CLI.
@@ -65,7 +74,12 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Ok,
     Error(String),
-    TimerList(Vec<Timer>),
+    /// Timer definitions plus every live run. Runs are needed by the `view`
+    /// commands to render progress blocks; the daemon owns all live state.
+    TimerList {
+        timers: Vec<Timer>,
+        runs: Vec<TimerRun>,
+    },
     TimerDetail {
         timer: Timer,
         runs: Vec<TimerRun>,

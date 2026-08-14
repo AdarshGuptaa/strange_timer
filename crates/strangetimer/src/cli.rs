@@ -36,6 +36,9 @@ pub enum Command {
     Stop(StopTarget),
     /// Stop every running timer.
     Stopall,
+    /// Opt in to the destructive `close_windows` buzzer (closes ALL other
+    /// windows when it fires).
+    ConfirmDestructive,
     /// View timers, buzzers, or a single timer's details.
     View {
         /// `timers` for all runs, `buzzers` for the buzzer library, or a

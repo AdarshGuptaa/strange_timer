@@ -22,3 +22,4 @@ open = "5"
 dirs = "5"
 interprocess = "2"
 anyhow = "1"
+reqwest = { version = "0.11", features = ["json"] }

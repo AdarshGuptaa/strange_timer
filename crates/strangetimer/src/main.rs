@@ -1,57 +1,44 @@
 mod cli;
+mod commands;
 
+use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Command, CreateKind, DeleteKind, DuplicateKind, PauseTarget, ResumeTarget, RunArgs, StopTarget};
+use cli::{Cli, Command, CreateKind, DeleteKind, DuplicateKind};
 
 fn main() {
     let cli = Cli::parse();
+    if let Err(e) = run(cli) {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Create { kind } => match kind {
-            CreateKind::Timer { name, rest } => {
-                not_implemented(&format!("create timer {name} {}", rest.join(" ")))
-            }
-            CreateKind::Buzzer(args) => not_implemented(&format!("create buzzer {}", args.name)),
+            CreateKind::Timer { name, rest } => commands::timers::create_timer(&name, &rest),
+            CreateKind::Buzzer(args) => commands::buzzers::create_buzzer(&args),
         },
         Command::Duplicate { kind } => match kind {
             DuplicateKind::Timer { source, new_name } => {
-                not_implemented(&match new_name {
-                    Some(n) => format!("duplicate timer {source} {n}"),
-                    None => format!("duplicate timer {source}"),
-                })
+                commands::timers::duplicate_timer(&source, new_name)
             }
         },
         Command::Delete { kind } => match kind {
-            DeleteKind::Timer { name } => not_implemented(&format!("delete timer {name}")),
-            DeleteKind::Buzzer { name } => not_implemented(&format!("delete buzzer {name}")),
+            DeleteKind::Timer { name } => commands::timers::delete_timer(&name),
+            DeleteKind::Buzzer { name } => commands::buzzers::delete_buzzer(&name),
         },
-        Command::Run(args) => run_branch(args),
-        Command::Pause(PauseTarget { name }) => not_implemented(&format!("pause {name}")),
-        Command::Pauseall => not_implemented("pauseall"),
-        Command::Resume(ResumeTarget { name }) => not_implemented(&format!("resume {name}")),
-        Command::Stop(StopTarget { name }) => not_implemented(&format!("stop {name}")),
-        Command::Stopall => not_implemented("stopall"),
+        Command::Run(args) => commands::control::run(&args),
+        Command::Pause(args) => commands::control::pause(&args.name),
+        Command::Pauseall => commands::control::pause_all(),
+        Command::Resume(args) => commands::control::resume(&args.name),
+        Command::Stop(args) => commands::control::stop(&args.name),
+        Command::Stopall => commands::control::stop_all(),
+        Command::ConfirmDestructive => commands::control::confirm_destructive(),
         Command::View { name } => match name.as_str() {
-            "timers" => not_implemented("view timers"),
-            "buzzers" => not_implemented("view buzzers"),
-            _ => not_implemented(&format!("view {name}")),
+            "timers" => commands::view::view_timers(),
+            "buzzers" => commands::buzzers::view_buzzers(),
+            _ => commands::view::view_timer(&name),
         },
     }
-}
-
-fn run_branch(args: RunArgs) {
-    let mut parts = vec![format!("run {}", args.name)];
-    if let Some(n) = args.count {
-        parts.push(format!("-n {n}"));
-    }
-    if args.infinite {
-        parts.push("-i".to_string());
-    }
-    if let Some(t) = args.schedule_time {
-        parts.push(format!("-t {t}"));
-    }
-    not_implemented(&parts.join(" "));
-}
-
-fn not_implemented(cmd: &str) {
-    println!("not yet implemented: {cmd}");
 }

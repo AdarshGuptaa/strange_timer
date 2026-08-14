@@ -59,6 +59,7 @@ pub struct TimerRun {
     pub status: TimerStatus,
     pub paused_at: Option<DateTime<Local>>,
     pub elapsed_before_pause: Duration,
+    pub fired_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +68,7 @@ pub enum RepeatMode {
     Infinite,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TimerStatus {
     Running,
     Paused,
@@ -80,4 +81,8 @@ pub struct DaemonState {
     pub runs: Vec<TimerRun>,
     /// True once the daemon has registered itself as an OS autostart service.
     pub registered: bool,
+    /// Wall-clock time of the most recent state save. Used by restart
+    /// recovery (Prompt 20) to reason about downtime; updated automatically
+    /// inside `persistence::save_state`.
+    pub last_saved_at: Option<DateTime<Local>>,
 }

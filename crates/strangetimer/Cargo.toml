@@ -14,3 +14,5 @@ rodio = { workspace = true }
 open = { workspace = true }
 dirs = { workspace = true }
 interprocess = { workspace = true }
+strangetimer-core = { path = "../strangetimer-core" }
+anyhow = { workspace = true }
