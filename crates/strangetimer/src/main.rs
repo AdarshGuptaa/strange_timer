@@ -35,6 +35,15 @@ fn run(cli: Cli) -> Result<()> {
         Command::Stop(args) => commands::control::stop(&args.name),
         Command::Stopall => commands::control::stop_all(),
         Command::ConfirmDestructive => commands::control::confirm_destructive(),
+        Command::Daemon { cmd } => commands::daemon::run(&cmd),
+        Command::Examples { install } => {
+            if install {
+                commands::examples::install_examples()
+            } else {
+                commands::examples::list_examples()
+            }
+        }
+        Command::Completions { shell } => commands::completions::print_completions(shell),
         Command::View { name } => match name.as_str() {
             "timers" => commands::view::view_timers(),
             "buzzers" => commands::buzzers::view_buzzers(),

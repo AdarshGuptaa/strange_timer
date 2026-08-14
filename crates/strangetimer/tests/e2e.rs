@@ -16,10 +16,8 @@ struct TestEnv {
 
 impl TestEnv {
     fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "strangetimer-e2e-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("strangetimer-e2e-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         TestEnv {
@@ -229,7 +227,12 @@ fn custom_buzzer_crud() {
     expect_success(
         &guard,
         &[
-            "create", "buzzer", "paymentAlert", "--audio", "--url", "https://bank.example.com",
+            "create",
+            "buzzer",
+            "paymentAlert",
+            "--audio",
+            "--url",
+            "https://bank.example.com",
         ],
     );
 
@@ -269,12 +272,8 @@ fn restart_fires_missed_alarm() {
     guard.child = Command::new(daemon_binary())
         .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
         .env("STRANGETIMER_SOCKET", &guard.env.socket)
-        .stdout(Stdio::from(
-            fs::File::create(&guard.log).unwrap(),
-        ))
-        .stderr(Stdio::from(
-            fs::File::create(&guard.log).unwrap(),
-        ))
+        .stdout(Stdio::from(fs::File::create(&guard.log).unwrap()))
+        .stderr(Stdio::from(fs::File::create(&guard.log).unwrap()))
         .spawn()
         .expect("failed to respawn strangetimer-daemon");
 
@@ -303,6 +302,112 @@ fn persistence_files_are_isolated() {
 
     for file in ["timers.json", "buzzers.json", "state.json"] {
         let path = guard.env.dir.join(file);
-        assert!(path.exists(), "{file} missing from {}", guard.env.dir.display());
+        assert!(
+            path.exists(),
+            "{file} missing from {}",
+            guard.env.dir.display()
+        );
     }
+}
+
+/// `strangetimer daemon status/stop/start` drive the daemon process through
+/// its full lifecycle without killing it by signal.
+#[test]
+fn daemon_lifecycle_via_cli() {
+    let mut guard = DaemonGuard::start(TestEnv::new("daemon-lifecycle"));
+
+    // status → running with a pid
+    let out = expect_success(&guard, &["daemon", "status"]);
+    assert!(out.contains("is running"), "expected running:\n{out}");
+    assert!(out.contains("pid"), "{out}");
+
+    // stop → graceful exit, then status reports not running
+    let out = expect_success(&guard, &["daemon", "stop"]);
+    assert!(out.contains("Stopped"), "{out}");
+    guard.child.wait().ok();
+    let out = expect_success(&guard, &["daemon", "status"]);
+    assert!(out.contains("not running"), "expected stopped:\n{out}");
+
+    // start → spawns a fresh daemon, status comes back
+    let out = expect_success(&guard, &["daemon", "start"]);
+    assert!(out.contains("Started"), "{out}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let out = guard.cli(&["daemon", "status"]);
+        if stdout_text(&out).contains("is running") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not restart:\n{}",
+            stdout_text(&out)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // stop again so the guard teardown has nothing to kill
+    expect_success(&guard, &["daemon", "stop"]);
+    guard.child.wait().ok();
+}
+
+/// `strangetimer examples` lists copy-paste commands and `--install` seeds
+/// the file-free examples into the library.
+#[test]
+fn examples_list_and_install() {
+    let guard = DaemonGuard::start(TestEnv::new("examples"));
+
+    let out = expect_success(&guard, &["examples"]);
+    assert!(
+        out.contains("exampleUrl"),
+        "missing example listing:\n{out}"
+    );
+    assert!(
+        out.contains("github.com/AdarshGuptaa/strange_timer"),
+        "{out}"
+    );
+
+    let out = expect_success(&guard, &["examples", "--install"]);
+    assert!(out.contains("Created"), "{out}");
+
+    let out = expect_success(&guard, &["view", "buzzers"]);
+    for name in [
+        "exampleAudio",
+        "exampleVideo",
+        "exampleUrl",
+        "exampleChain",
+        "exampleLlm",
+    ] {
+        assert!(
+            out.contains(name),
+            "missing installed example {name}:\n{out}"
+        );
+    }
+
+    // Idempotent: installing again skips, does not fail.
+    let out = expect_success(&guard, &["examples", "--install"]);
+    assert!(out.contains("Skipped"), "{out}");
+}
+
+/// CloseApplication and FocusWindow buzzers parse, install and display.
+#[test]
+fn close_app_and_focus_window_buzzers() {
+    let guard = DaemonGuard::start(TestEnv::new("window-actions"));
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "tidyUp",
+            "--close-app",
+            "firefox",
+            "--focus-window",
+            "Slack",
+        ],
+    );
+
+    let out = expect_success(&guard, &["view", "buzzers"]);
+    assert!(out.contains("tidyUp"), "{out}");
+    assert!(out.contains("close_app"), "{out}");
+    assert!(out.contains("focus_window"), "{out}");
+    assert!(out.contains("confirm-destructive"), "{out}");
 }

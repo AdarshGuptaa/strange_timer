@@ -5,8 +5,9 @@ How to build, test, and extend StrangeTimer.
 ## Prerequisites
 
 - Rust 1.75+ (stable toolchain via [rustup](https://rustup.rs))
-- For the full experience on Linux: `wmctrl` or `xdotool` (close_windows),
-  and [Ollama](https://ollama.com) for `--llm` buzzers.
+- For the full experience on Linux: `wmctrl` or `xdotool` (close_windows,
+  focus_window), `pkill` (close_app), and [Ollama](https://ollama.com) for
+  `--llm` buzzers.
 - A C/C++ system compiler is required to build the native crates
   (rodio/alsa on Linux).
 
@@ -27,8 +28,8 @@ target/debug/strangetimer-daemon   background service
 ## Running
 
 ```sh
-# Terminal 1: the daemon (runs in the foreground, logs to stderr)
-target/debug/strangetimer-daemon
+# Terminal 1: start the daemon (managed, detached; logs to the data dir)
+target/debug/strangetimer daemon start
 
 # Terminal 2: the CLI
 target/debug/strangetimer create timer workAndFun 45min 15min
@@ -37,7 +38,23 @@ target/debug/strangetimer view timers     # press any key to exit the view
 ```
 
 On first run the daemon registers itself for autostart (systemd/launchd/
-Task Scheduler). To stop the daemon: `Ctrl+C` (SIGTERM also works).
+Task Scheduler). Manage it with:
+
+```sh
+target/debug/strangetimer daemon status    # running? pid + version
+target/debug/strangetimer daemon stop      # graceful: saves state, exits
+target/debug/strangetimer daemon restart
+```
+
+`daemon stop` sends an IPC `Shutdown` message — the same graceful teardown
+as SIGINT/SIGTERM. A second daemon process still refuses to bind while one
+is running ("Address already in use"); the CLI commands above are the
+supported way to hand the socket over. To run the daemon in the foreground
+instead (e.g. while hacking on it): `target/debug/strangetimer-daemon`.
+
+`daemon start` locates the daemon binary next to the CLI binary, then on
+`PATH`, and honours the `STRANGETIMER_DAEMON` env var as an override. Its
+stdout/stderr go to `daemon.log` in the data dir.
 
 ### Isolated instances (for testing / demos)
 
@@ -95,14 +112,35 @@ crates/
    `handle_message` (`strangetimer-daemon/src/main.rs`). If it touches
    state, put the logic on `AppState` and persist before returning.
 
+### Adding a daemon-management command
+
+`strangetimer daemon <start|stop|status|restart>` lives in
+`strangetimer/src/commands/daemon.rs` and uses three IPC messages:
+`Ping` (→ `ServerMessage::Status { pid, version }`), `Shutdown` (graceful
+exit) and the connect probe. The daemon answers `Shutdown` in
+`handle_connection` (before dispatch) by notifying a
+`tokio::sync::Notify` that tears down the accept loop, so the CLI always
+gets its `Ok` before the listener closes.
+
 ### Adding a buzzer action type
 
 1. Add the variant to `BuzzerAction` in `strangetimer-core/src/model.rs`.
 2. Add a dispatch arm in `strangetimer-daemon/src/buzzers/mod.rs` and a
-   module (or inline logic) implementing the side effect.
+   module (or inline logic) implementing the side effect. Destructive
+   actions (anything that closes things) must be gated behind
+   `AppState::is_close_windows_confirmed()` like `CloseAllWindows` /
+   `CloseApplication`.
 3. If it takes CLI flags, extend `CreateBuzzerArgs` and
    `build_actions` in `strangetimer/src/commands/buzzers.rs`.
 4. Add a label in `action_label` (same file) for the `view buzzers` table.
+
+### Examples (`strangetimer examples`)
+
+`strangetimer/src/commands/examples.rs` owns the example set. Entries with
+`installable_actions: Some(...)` (no user-specific files) can be installed
+with `examples --install`; the rest are docs-only and listed in
+`docs/BUZZER_EXAMPLES.md`. Keep one example per action type when adding a
+new one.
 
 ### Changing persistence or the IPC protocol
 
@@ -127,7 +165,26 @@ dir or bump the schema). Keep `write_json_atomic`'s unique-temp invariant
 | Data dir | `~/.local/share/strangetimer/` | `~/Library/Application Support/strangetimer/` | `%APPDATA%\strangetimer\` |
 | Autostart | systemd user unit + `systemctl --user enable --now` | launchd plist + `launchctl load` | `schtasks /Create /SC ONLOGON` |
 | Close windows | `wmctrl` → fallback `xdotool` | `osascript` | `taskkill` |
+| Close app | `pkill -x` → fallback `pkill -f` | `osascript quit` → `pkill -x` | `taskkill /IM` → `/F` |
+| Focus window | `wmctrl -a` → fallback `xdotool search --name` | `osascript activate` | PowerShell `AppActivate` |
 | Media focus | stub (TODO) | stub (TODO) | stub (TODO) |
 
 Only Linux has been exercised in CI; macOS/Windows paths are implemented
 but untested — report issues if you hit them.
+
+## Releasing
+
+Cutting a release is tag-driven: `.github/workflows/release.yml` runs the
+test suite, then builds and packages release archives for linux-x86_64,
+macos-x86_64, macos-aarch64 and windows-x86_64 and uploads them to the
+GitHub release for the tag.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Each archive contains both binaries, shell completions
+(`completions/`), man pages (`man/`, Linux archive only — generated with
+`help2man`), `LICENSE` and `README.md`. Completions are generated by the
+built binary itself (`strangetimer completions <shell>`), so they always
+match the shipped CLI.

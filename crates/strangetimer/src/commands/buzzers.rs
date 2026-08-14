@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{Buzzer, BuzzerAction, LlmPromptSource};
 
@@ -63,14 +63,18 @@ pub fn view_buzzers() -> Result<()> {
     }
 
     if buzzers.iter().any(|b| {
-        b.actions
-            .iter()
-            .any(|a| matches!(a, BuzzerAction::CloseAllWindows))
+        b.actions.iter().any(|a| {
+            matches!(
+                a,
+                BuzzerAction::CloseAllWindows | BuzzerAction::CloseApplication(_)
+            )
+        })
     }) {
         println!();
         println!(
-            "WARNING: the close_windows buzzer closes ALL open windows when it \
-             fires.\nRun `strangetimer confirm-destructive` to enable it."
+            "WARNING: the close_windows / close_app buzzers close windows \
+             when they fire.\nRun `strangetimer confirm-destructive` to \
+             enable them."
         );
     }
 
@@ -104,6 +108,12 @@ fn build_actions(args: &CreateBuzzerArgs) -> Result<Vec<BuzzerAction>> {
     if let Some(bash) = &args.bash {
         actions.push(BuzzerAction::Bash(PathBuf::from(bash)));
     }
+    if let Some(app) = &args.close_app {
+        actions.push(BuzzerAction::CloseApplication(app.clone()));
+    }
+    if let Some(window) = &args.focus_window {
+        actions.push(BuzzerAction::FocusWindow(window.clone()));
+    }
     if let Some(llm) = &args.llm {
         let model = llm[0].clone();
         let prompt_or_file = llm[1].clone();
@@ -118,7 +128,8 @@ fn build_actions(args: &CreateBuzzerArgs) -> Result<Vec<BuzzerAction>> {
     if actions.is_empty() {
         return Err(anyhow!(
             "a buzzer needs at least one action — pass one or more of \
-             --audio, --video, --application, --url, --bash, --llm"
+             --audio, --video, --application, --url, --bash, --close-app, \
+             --focus-window, --llm"
         ));
     }
 
@@ -133,6 +144,8 @@ fn action_label(action: &BuzzerAction) -> String {
         BuzzerAction::Application(_) => "application".to_string(),
         BuzzerAction::Url(_) => "url".to_string(),
         BuzzerAction::Bash(_) => "bash".to_string(),
+        BuzzerAction::CloseApplication(_) => "close_app".to_string(),
+        BuzzerAction::FocusWindow(_) => "focus_window".to_string(),
         BuzzerAction::Llm { .. } => "llm".to_string(),
     }
 }
@@ -149,6 +162,8 @@ mod tests {
             application: None,
             url: None,
             bash: None,
+            close_app: None,
+            focus_window: None,
             llm: None,
         }
     }
@@ -166,7 +181,9 @@ mod tests {
         let mut a = args();
         a.audio = Some("/tmp/x.wav".to_string());
         let actions = build_actions(&a).unwrap();
-        assert!(matches!(&actions[0], BuzzerAction::Audio(Some(p)) if p == std::path::Path::new("/tmp/x.wav")));
+        assert!(
+            matches!(&actions[0], BuzzerAction::Audio(Some(p)) if p == std::path::Path::new("/tmp/x.wav"))
+        );
     }
 
     #[test]
@@ -181,5 +198,28 @@ mod tests {
     #[test]
     fn no_flags_is_an_error() {
         assert!(build_actions(&args()).is_err());
+    }
+
+    #[test]
+    fn close_app_and_focus_window_map_to_actions() {
+        let mut a = args();
+        a.close_app = Some("firefox".to_string());
+        a.focus_window = Some("Slack".to_string());
+        let actions = build_actions(&a).unwrap();
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(&actions[0], BuzzerAction::CloseApplication(n) if n == "firefox"));
+        assert!(matches!(&actions[1], BuzzerAction::FocusWindow(n) if n == "Slack"));
+    }
+
+    #[test]
+    fn action_labels_cover_new_actions() {
+        assert_eq!(
+            action_label(&BuzzerAction::CloseApplication("x".to_string())),
+            "close_app"
+        );
+        assert_eq!(
+            action_label(&BuzzerAction::FocusWindow("x".to_string())),
+            "focus_window"
+        );
     }
 }

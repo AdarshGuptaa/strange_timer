@@ -7,10 +7,12 @@ mod state;
 
 use anyhow::{Context, Result};
 use interprocess::local_socket::traits::tokio::Listener as TokioListener;
-use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::ipc::socket_name;
+use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{Buzzer, BuzzerAction, TimerStatus};
-use strangetimer_core::persistence::{load_buzzers, load_state, load_timers, save_buzzers, save_state};
+use strangetimer_core::persistence::{
+    load_buzzers, load_state, load_timers, save_buzzers, save_state,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -81,8 +83,12 @@ async fn main() -> Result<()> {
     let listener = bind_listener(&socket_name()).context("failed to bind IPC listener")?;
     eprintln!("strangetimer-daemon: listening on {}", socket_name());
 
+    // `shutdown` lets an IPC `Shutdown` request (from `strangetimer daemon
+    // stop`) tear the accept loop down just like a signal would.
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
     tokio::select! {
-        result = accept_loop(listener, Arc::clone(&app_state)) => {
+        result = accept_loop(listener, Arc::clone(&app_state), Arc::clone(&shutdown)) => {
             if let Err(e) = result {
                 eprintln!("strangetimer-daemon: accept loop exited with error: {e:#}");
             }
@@ -134,9 +140,7 @@ async fn fire_buzzer(name: &str, state: Arc<AppState>) {
                 buzzers::dispatch(&state, action).await;
             }
         }
-        None => eprintln!(
-            "strangetimer-daemon: BUZZ: {name} — no such buzzer (was it deleted?)"
-        ),
+        None => eprintln!("strangetimer-daemon: BUZZ: {name} — no such buzzer (was it deleted?)"),
     }
 }
 
@@ -196,9 +200,7 @@ async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<String>) {
 
     // Fire missed alarms immediately — dispatch happens in the fire task.
     for name in missed {
-        eprintln!(
-            "strangetimer-daemon: firing missed alarm for {name:?} from downtime"
-        );
+        eprintln!("strangetimer-daemon: firing missed alarm for {name:?} from downtime");
         if let Err(e) = buzzer_tx.send(name).await {
             eprintln!("strangetimer-daemon: recovery buzzer channel error: {e}");
             break;
@@ -227,7 +229,10 @@ fn bind_listener(name: &str) -> Result<interprocess::local_socket::tokio::Listen
             if !alive {
                 std::fs::remove_file(path)
                     .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
-                eprintln!("strangetimer-daemon: removed stale socket {}", path.display());
+                eprintln!(
+                    "strangetimer-daemon: removed stale socket {}",
+                    path.display()
+                );
             }
         }
     }
@@ -247,15 +252,29 @@ fn bind_listener(name: &str) -> Result<interprocess::local_socket::tokio::Listen
         .context("failed to create tokio listener")
 }
 
-async fn accept_loop(listener: interprocess::local_socket::tokio::Listener, app_state: Arc<AppState>) -> Result<()> {
+async fn accept_loop(
+    listener: interprocess::local_socket::tokio::Listener,
+    app_state: Arc<AppState>,
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
     loop {
-        let conn = listener.accept().await.context("accept failed")?;
-        let state = Arc::clone(&app_state);
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn, state).await {
-                eprintln!("strangetimer-daemon: connection error: {e:#}");
+        tokio::select! {
+            _ = shutdown.notified() => {
+                // An IPC Shutdown request wants the daemon to stop serving.
+                // Return so `main` runs the normal save-and-exit teardown.
+                return Ok(());
             }
-        });
+            conn = listener.accept() => {
+                let conn = conn.context("accept failed")?;
+                let state = Arc::clone(&app_state);
+                let shutdown = Arc::clone(&shutdown);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(conn, state, shutdown).await {
+                        eprintln!("strangetimer-daemon: connection error: {e:#}");
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -264,6 +283,7 @@ async fn accept_loop(listener: interprocess::local_socket::tokio::Listener, app_
 async fn handle_connection(
     mut conn: interprocess::local_socket::tokio::Stream,
     app_state: Arc<AppState>,
+    shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let msg: ClientMessage = read_message_async(&mut conn)
         .await
@@ -273,6 +293,17 @@ async fn handle_connection(
         "strangetimer-daemon: received ClientMessage::{}",
         variant_name(&msg)
     );
+
+    // Shutdown is special: it is answered before the normal handler so the
+    // client gets its Ok even though the accept loop is about to stop.
+    if matches!(msg, ClientMessage::Shutdown) {
+        write_message_async(&mut conn, &ServerMessage::Ok)
+            .await
+            .context("failed to write ServerMessage")?;
+        eprintln!("strangetimer-daemon: graceful shutdown requested over IPC");
+        shutdown.notify_one();
+        return Ok(());
+    }
 
     let response = handle_message(msg, Arc::clone(&app_state)).await;
 
@@ -286,9 +317,7 @@ async fn handle_connection(
 /// Apply a client message to the daemon state and produce the response.
 async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessage {
     match msg {
-        ClientMessage::CreateTimer { timer } => {
-            reply(state.add_timer(timer).await)
-        }
+        ClientMessage::CreateTimer { timer } => reply(state.add_timer(timer).await),
         ClientMessage::DuplicateTimer { source, new_name } => {
             match state.duplicate_timer(&source, new_name).await {
                 Ok(name) => {
@@ -324,22 +353,29 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             timers: state.get_timers().await,
             runs: state.lock().await.state.runs.clone(),
         },
-        ClientMessage::GetTimer { name } => {
-            match state.get_timer(&name).await {
-                Some(timer) => {
-                    let runs = match state.get_run(&name).await {
-                        Some(run) => vec![run],
-                        None => Vec::new(),
-                    };
-                    ServerMessage::TimerDetail { timer, runs }
-                }
-                None => ServerMessage::Error(format!("no timer named {name:?}")),
+        ClientMessage::GetTimer { name } => match state.get_timer(&name).await {
+            Some(timer) => {
+                let runs = match state.get_run(&name).await {
+                    Some(run) => vec![run],
+                    None => Vec::new(),
+                };
+                ServerMessage::TimerDetail { timer, runs }
             }
-        }
+            None => ServerMessage::Error(format!("no timer named {name:?}")),
+        },
         ClientMessage::GetBuzzers => ServerMessage::BuzzerList(state.get_buzzers().await),
         ClientMessage::ConfirmDestructive => {
             state.set_close_windows_confirmed().await;
             ServerMessage::Ok
+        }
+        ClientMessage::Ping => ServerMessage::Status {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        ClientMessage::Shutdown => {
+            // Handled in `handle_connection` before dispatch; this arm is
+            // unreachable but kept exhaustive.
+            unreachable!("Shutdown is intercepted in handle_connection")
         }
     }
 }
@@ -370,6 +406,8 @@ fn variant_name(msg: &ClientMessage) -> &'static str {
         ClientMessage::GetTimer { .. } => "GetTimer",
         ClientMessage::GetBuzzers => "GetBuzzers",
         ClientMessage::ConfirmDestructive => "ConfirmDestructive",
+        ClientMessage::Ping => "Ping",
+        ClientMessage::Shutdown => "Shutdown",
     }
 }
 
@@ -427,7 +465,7 @@ where
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::signal::unix::{signal, SignalKind};
         let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
         let mut sigterm =
             signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");

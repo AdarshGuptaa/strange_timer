@@ -1,18 +1,20 @@
 pub mod buzzers;
+pub mod completions;
 pub mod control;
+pub mod daemon;
+pub mod examples;
 pub mod timers;
 pub mod view;
 
 use anyhow::{Context, Result};
-use strangetimer_core::ipc::{ClientMessage, ServerMessage, socket_name};
+use strangetimer_core::ipc::{socket_name, ClientMessage, ServerMessage};
 
 /// Open a connection to the daemon's IPC endpoint and exchange a single
 /// message pair (request → response). The connection is short-lived: the
 /// daemon accepts, handles, and closes each one.
 pub fn send_and_receive(msg: &ClientMessage) -> Result<ServerMessage> {
     let mut conn = connect()?;
-    strangetimer_core::ipc::write_message(&mut conn, msg)
-        .context("failed to write IPC message")?;
+    strangetimer_core::ipc::write_message(&mut conn, msg).context("failed to write IPC message")?;
     let response = strangetimer_core::ipc::read_message::<ServerMessage>(&mut conn)
         .context("failed to read IPC response")?;
     Ok(response)
@@ -43,7 +45,7 @@ pub fn connect() -> Result<interprocess::local_socket::Stream> {
 fn daemon_hint() -> String {
     format!(
         "failed to connect to the StrangeTimer daemon at {} — \
-         is it running? (start it with `strangetimer-daemon`)",
+         is it running? (start it with `strangetimer daemon start`)",
         socket_name()
     )
 }
@@ -67,5 +69,6 @@ fn variant_of(msg: &ServerMessage) -> &'static str {
         ServerMessage::TimerList { .. } => "TimerList",
         ServerMessage::TimerDetail { .. } => "TimerDetail",
         ServerMessage::BuzzerList(_) => "BuzzerList",
+        ServerMessage::Status { .. } => "Status",
     }
 }

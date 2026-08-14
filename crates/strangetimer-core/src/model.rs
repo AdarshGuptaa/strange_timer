@@ -37,6 +37,13 @@ pub enum BuzzerAction {
     Application(PathBuf),
     Url(String),
     Bash(PathBuf),
+    /// Close a running application by process name (e.g. `firefox`).
+    /// Destructive and gated behind `confirm-destructive` like
+    /// `CloseAllWindows`; use `--close-app NAME`.
+    CloseApplication(String),
+    /// Bring a window matching a title substring or application name to the
+    /// foreground. Non-destructive; use `--focus-window NAME`.
+    FocusWindow(String),
     Llm {
         model: String,
         prompt: LlmPromptSource,

@@ -66,6 +66,9 @@ crates/
       timers.rs                   create/duplicate/delete timer
       buzzers.rs                  create/delete/view buzzers
       control.rs                  run/pause/resume/stop/confirm-destructive
+      daemon.rs                   daemon start/stop/status/restart
+      examples.rs                 `strangetimer examples [--install]`
+      completions.rs              shell completion script generation
       view.rs                     static + animated progress rendering
     tests/e2e.rs                  end-to-end tests (real binaries + IPC)
   strangetimer-daemon/            background service binary
@@ -125,6 +128,7 @@ Buzzer {
 BuzzerAction = DefaultAudio | DefaultVideo | CloseAllWindows
              | Audio(Option<PathBuf>) | Video(Option<PathBuf>)
              | Application(PathBuf) | Url(String) | Bash(PathBuf)
+             | CloseApplication(String) | FocusWindow(String)
              | Llm { model: String, prompt: LlmPromptSource }
 LlmPromptSource = Inline(String) | File(PathBuf)
 ```
@@ -258,6 +262,8 @@ Resume { name }                  Stop { name }
 StopAll                          GetTimers
 GetTimer { name }                GetBuzzers
 ConfirmDestructive               ← opt-in for the close_windows buzzer
+Ping                             ← liveness probe (daemon lifecycle)
+Shutdown                         ← graceful daemon stop (daemon lifecycle)
 ```
 
 Daemon → client:
@@ -267,6 +273,7 @@ Ok | Error(String)
 TimerList { timers, runs }        ← runs included so `view` can render
 TimerDetail { timer, runs }
 BuzzerList(Vec<Buzzer>)
+Status { pid, version }           ← reply to Ping
 ```
 
 **Design note:** `TimerList` carries the live runs as well as the timer
@@ -357,15 +364,18 @@ The scheduler only ever sends **names** over the channel. The fire task in
 | `Url(u)` | `buzzers/url.rs` — `open::that(u)`. |
 | `Bash(p)` | `buzzers/bash.rs` — `sh -c <p>` on Unix, `cmd /C <p>` on Windows, spawned detached. |
 | `CloseAllWindows` | `buzzers/close_windows.rs` — see §7.1. |
+| `CloseApplication(n)` | `buzzers/close_application.rs` — `pkill -x n` → `pkill -f n` (Linux), `osascript quit` → `pkill -x` (macOS), `taskkill /IM n` → `/F` (Windows). Destructive: gated like §7.1. |
+| `FocusWindow(n)` | `buzzers/focus_window.rs` — `wmctrl -a n` → `xdotool search --name n windowactivate` (Linux), `osascript tell application n to activate` (macOS), PowerShell `AppActivate` (Windows). Non-destructive. |
 | `Llm { model, prompt }` | `buzzers/llm.rs` — see §7.2. |
 
 An unknown buzzer name degrades to a logged `BUZZ: <name>` warning instead
 of a silent failure.
 
-### 7.1 The destructive buzzer
+### 7.1 The destructive buzzers
 
 `close_windows` closes every visible window except the daemon's own
-terminal. It requires an explicit, per-daemon-session opt-in:
+terminal; `close_app` closes one named application. Both require an
+explicit, per-daemon-session opt-in:
 
 1. `strangetimer confirm-destructive` sends `ConfirmDestructive`.
 2. `dispatch` checks `AppState::is_close_windows_confirmed()`; without it
@@ -437,13 +447,39 @@ the downtime all go off immediately.
 
 ### 8.3 Shutdown
 
-SIGINT/SIGTERM (Ctrl+C on Windows) breaks the accept loop; the final state
-is saved before exit. SIGKILL / power loss are handled by §8.2 on the next
-start. One detail worth noting: a Unix-domain socket leaves a stale file
-after an unclean death. Before binding, the daemon probes the path — if
-nothing is listening, it removes the stale file and rebinds; if something
-is listening, the bind fails loudly (another daemon owns the endpoint).
-Without this, a crashed daemon could never restart.
+Three ways to stop the daemon, all ending in the same save-and-exit path:
+
+1. **Signal** — SIGINT/SIGTERM (Ctrl+C on Windows) breaks the `tokio::select!`
+   in `main`; the final state is saved before exit.
+2. **IPC** — `strangetimer daemon stop` sends `Shutdown`. It is intercepted
+   in `handle_connection` (before the normal dispatch) so the client
+   receives its `Ok` first, then a shared `tokio::sync::Notify` is fired.
+   The accept loop is a `select!` between `accept()` and that notify, so
+   it returns and the same teardown runs. This makes the daemon lifecycle
+   scriptable without signals.
+3. **Crash** — SIGKILL / power loss; handled by §8.2 on the next start.
+
+One detail worth noting: a Unix-domain socket leaves a stale file after an
+unclean death. Before binding, the daemon probes the path — if nothing is
+listening, it removes the stale file and rebinds; if something is
+listening, the bind fails loudly (another daemon owns the endpoint).
+Without this, a crashed daemon could never restart. `daemon start` /
+`daemon stop` rely on the same probe: a new daemon never steals a live
+endpoint, so `stop` (graceful handover) then `start` is the only supported
+way to replace a running daemon.
+
+### 8.4 Daemon lifecycle management (`strangetimer daemon`)
+
+The CLI (`commands/daemon.rs`) manages the process:
+
+- `status` — sends `Ping`; `Some(Status{..})` means running.
+- `start` — refuses if `status` says running; otherwise locates the daemon
+  binary (sibling of the CLI exe → `PATH` → `STRANGETIMER_DAEMON`), spawns
+  it detached (new process group on Unix, `DETACHED_PROCESS` on Windows,
+  stdout/stderr → `daemon.log` in the data dir) and polls the socket for
+  readiness.
+- `stop` — sends `Shutdown`, then polls until the socket stops accepting.
+- `restart` — stop followed by start.
 
 ---
 
@@ -461,6 +497,11 @@ connect()  →  write_message(ClientMessage)  →  read_message(ServerMessage)
 turns `ServerMessage::Error` into a user-facing error with a non-zero exit
 code). The CLI holds **no** timer state — all of it lives in the daemon —
 so the two binaries can never disagree about what is running.
+
+The daemon-lifecycle commands (`daemon.rs`) are the one family that also
+spawns a process: `daemon start` launches the daemon binary detached and
+polls the socket until the listener accepts, and `daemon stop` sends
+`Shutdown` and polls until it stops accepting.
 
 ### 9.2 Parsing rules worth knowing
 
@@ -531,16 +572,17 @@ about and to test.
 ## 11. Failure Modes
 
 | Failure | Behaviour |
-|---|---|
-| Daemon not running | CLI prints `failed to connect ... is it running?` and exits 1. |
+|---|---|---|
+| Daemon not running | CLI prints `failed to connect ... is it running? (start it with strangetimer daemon start)` and exits 1. `daemon status` reports "not running". |
 | Daemon crashes (SIGKILL) | Stale socket removed on restart; state replayed from disk; missed alarms fire immediately. |
 | Power loss mid-write | Atomic rename leaves the previous state file intact. |
-| Two daemons | Second bind fails loudly ("Address already in use"); the probe refuses to steal a live endpoint. |
+| Two daemons | Second bind fails loudly ("Address already in use"); the probe refuses to steal a live endpoint. Replace via `strangetimer daemon stop` → `start`. |
 | Ollama down | LLM buzzer logs a warning and plays the built-in chime. |
 | No audio device | rodio logs a playback error; the rest of the daemon is unaffected. |
 | Unknown buzzer name | Fire task logs `BUZZ: <name> — no such buzzer` instead of dying. |
 | Corrupt JSON | Persistence surfaces a descriptive parse error; daemon refuses to start (no silent data loss). |
 | Deleted timer still running | `delete timer` is refused while a run is active; stop first. |
+| `close_app` / `close_windows` not opted in | Action logs a warning and does nothing — never closes without `confirm-destructive`. |
 
 ---
 
@@ -561,7 +603,9 @@ about and to test.
   drive it with the real CLI over real IPC, isolated per test via
   `STRANGETIMER_DATA_DIR` + `STRANGETIMER_SOCKET`. Covers seeding, CRUD,
   delete guards, alarm firing (asserting on daemon stderr), pause/resume,
-  crash-recovery, and persistence-file placement.
+  crash-recovery, persistence-file placement, the full daemon lifecycle
+  (`status` → `stop` → `start` → `stop`), `examples --install`, and the
+  new window-action buzzers.
 
 Run everything with `cargo test --workspace` (builds all binaries first)
 and lint with `cargo clippy --workspace --all-targets`.
@@ -574,10 +618,10 @@ and lint with `cargo clippy --workspace --all-targets`.
   authentication. Anything that can write to it can start/stop timers or
   trigger buzzers. This is acceptable for a single-user desktop tool but is
   worth knowing before enabling multi-user access.
-- `bash` buzzers execute arbitrary commands and `close_windows` is
-  destructive; the latter is gated behind an explicit opt-in per daemon
-  session (§7.1). Prompt payloads sent to Ollama may contain anything the
-  user wrote; they stay on the local machine.
+- `bash` buzzers execute arbitrary commands and `close_windows` /
+  `close_app` are destructive; the latter two are gated behind an explicit
+  opt-in per daemon session (§7.1). Prompt payloads sent to Ollama may
+  contain anything the user wrote; they stay on the local machine.
 - Secrets in LLM prompts or bash scripts are handled exactly as the user
   configures them — nothing is logged beyond the action type.
 
@@ -595,3 +639,5 @@ and lint with `cargo clippy --workspace --all-targets`.
 | 6 | `create timer` accepts duplicate names | Refused | Names are the identity key for every other command. |
 | 7 | View is animated only | Static fallback when stdout is not a TTY | Scriptable/piped output and e2e assertions. |
 | 8 | `close_windows_confirmed` unpersisted | Stays in-memory | Destructive opt-in should not survive a restart. |
+| 9 | Daemon takeover (Prompt 22 option) | CLI-managed lifecycle only; daemon never steals a live endpoint | Predictable: "which daemon is mine?" has one answer; graceful stop+start is the supported handover. |
+| 10 | `examples --install` installs every example | Only file-free examples installable; path-based ones are docs-only | Audio/app/script paths are machine-specific; a broken default path would be worse than a copy-paste command. |

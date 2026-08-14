@@ -1,0 +1,87 @@
+name: Release
+
+# Cut a release by pushing a tag matching v*:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The workflow tests, builds, packages and uploads archives for every
+# platform to the GitHub release for that tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  build:
+    name: Package ${{ matrix.label }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            archive: tar.gz
+          - label: macos-x86_64
+            os: macos-13
+            archive: tar.gz
+          - label: macos-aarch64
+            os: macos-14
+            archive: tar.gz
+          - label: windows-x86_64
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binaries
+        run: cargo build --release --workspace
+
+      - name: Generate shell completions
+        shell: bash
+        run: |
+          mkdir -p dist/completions
+          ./target/release/strangetimer completions bash > dist/completions/strangetimer.bash
+          ./target/release/strangetimer completions zsh  > dist/completions/_strangetimer
+          ./target/release/strangetimer completions fish > dist/completions/strangetimer.fish
+
+      - name: Generate man pages (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update && sudo apt-get install -y help2man
+          mkdir -p dist/man
+          help2man -N -n "StrangeTimer CLI" ./target/release/strangetimer > dist/man/strangetimer.1
+          help2man -N -n "StrangeTimer background daemon" ./target/release/strangetimer-daemon > dist/man/strangetimer-daemon.1
+
+      - name: Assemble archive
+        shell: bash
+        run: |
+          cp ./target/release/strangetimer dist/
+          cp ./target/release/strangetimer-daemon dist/
+          cp ./LICENSE dist/
+          cp ./README.md dist/
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cd dist && 7z a -tzip ../strangetimer-${{ matrix.label }}.zip *
+          else
+            tar -C dist -czf strangetimer-${{ matrix.label }}.tar.gz .
+          fi
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: strangetimer-${{ matrix.label }}.${{ matrix.archive }}
+          fail_on_unmatched_files: true

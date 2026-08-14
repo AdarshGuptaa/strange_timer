@@ -1,7 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "strangetimer", version, about = "StrangeTimer — CLI timer application")]
+#[command(
+    name = "strangetimer",
+    version,
+    about = "StrangeTimer — CLI timer application"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -39,12 +43,50 @@ pub enum Command {
     /// Opt in to the destructive `close_windows` buzzer (closes ALL other
     /// windows when it fires).
     ConfirmDestructive,
+    /// Manage the background daemon process.
+    Daemon {
+        #[command(subcommand)]
+        cmd: DaemonCommand,
+    },
+    /// Show or install example buzzers demonstrating every action type.
+    Examples {
+        /// Create the example buzzers in the daemon's library (skips any
+        /// that already exist).
+        #[arg(long)]
+        install: bool,
+    },
+    /// Print a shell completion script for this CLI.
+    Completions {
+        /// Which shell to generate completions for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// View timers, buzzers, or a single timer's details.
     View {
         /// `timers` for all runs, `buzzers` for the buzzer library, or a
         /// timer name to show that timer's progress block + buzzer table.
         name: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommand {
+    /// Start the daemon in the background (no-op if it is already running).
+    Start,
+    /// Stop the running daemon gracefully (it saves state and exits).
+    Stop,
+    /// Report whether the daemon is running and its PID/version.
+    Status,
+    /// Stop the daemon, then start it again.
+    Restart,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
 }
 
 #[derive(Subcommand, Debug)]
@@ -129,6 +171,14 @@ pub struct CreateBuzzerArgs {
     /// Run a bash script from the given path.
     #[arg(long)]
     pub bash: Option<String>,
+    /// Close a running application by process name (e.g. `firefox`).
+    /// Destructive — requires `strangetimer confirm-destructive` first.
+    #[arg(long)]
+    pub close_app: Option<String>,
+    /// Bring a window matching the given title or application name to the
+    /// foreground (e.g. `--focus-window firefox`).
+    #[arg(long)]
+    pub focus_window: Option<String>,
     /// Invoke an LLM via Ollama. Arg form: `<model> <prompt_or_file>`.
     /// `prompt_or_file` is inline if it parses as text, otherwise read as a
     /// file path at fire time.

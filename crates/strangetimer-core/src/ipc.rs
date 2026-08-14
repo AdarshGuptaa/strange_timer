@@ -67,6 +67,13 @@ pub enum ClientMessage {
     /// Opt-in acknowledgement that the `close_windows` buzzer is allowed to
     /// close all other windows. Guarded by `state.close_windows_confirmed`.
     ConfirmDestructive,
+    /// Liveness probe: the daemon answers with `ServerMessage::Status`.
+    /// Used by `strangetimer daemon status/start` to detect a running daemon.
+    Ping,
+    /// Graceful shutdown request. The daemon replies `Ok`, saves state and
+    /// exits — the same teardown path as SIGINT/SIGTERM. Used by
+    /// `strangetimer daemon stop/restart`.
+    Shutdown,
 }
 
 /// Responses sent from the daemon to the CLI.
@@ -85,6 +92,11 @@ pub enum ServerMessage {
         runs: Vec<TimerRun>,
     },
     BuzzerList(Vec<Buzzer>),
+    /// Reply to `ClientMessage::Ping`: the daemon's process id and version.
+    Status {
+        pid: u32,
+        version: String,
+    },
 }
 
 /// Write a single length-prefixed JSON message to `stream`.
@@ -92,8 +104,7 @@ pub enum ServerMessage {
 /// Frame layout: `[u32 BE length][JSON payload]`.
 pub fn write_message<T: Serialize>(stream: &mut impl Write, msg: &T) -> Result<()> {
     let payload = serde_json::to_vec(msg).context("failed to serialise IPC message")?;
-    let len = u32::try_from(payload.len())
-        .context("IPC payload exceeds u32::MAX bytes")?;
+    let len = u32::try_from(payload.len()).context("IPC payload exceeds u32::MAX bytes")?;
     stream
         .write_all(&len.to_be_bytes())
         .context("failed to write IPC length prefix")?;
@@ -120,9 +131,7 @@ pub fn read_message<T: DeserializeOwned>(stream: &mut impl Read) -> Result<T> {
     // enormous length that would force us to allocate gigabytes.
     const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
     if len > MAX_PAYLOAD {
-        anyhow::bail!(
-            "IPC payload length {len} exceeds sanity cap of {MAX_PAYLOAD} bytes"
-        );
+        anyhow::bail!("IPC payload length {len} exceeds sanity cap of {MAX_PAYLOAD} bytes");
     }
 
     let mut payload = vec![0u8; len];
@@ -154,7 +163,11 @@ mod tests {
         write_message(&mut buf, &original).unwrap();
         let decoded: ClientMessage = read_message(&mut buf.as_slice()).unwrap();
         match decoded {
-            ClientMessage::RunTimer { name, repeat, schedule_time } => {
+            ClientMessage::RunTimer {
+                name,
+                repeat,
+                schedule_time,
+            } => {
                 assert_eq!(name, "workAndFun");
                 assert!(matches!(repeat, RepeatMode::Infinite));
                 assert!(schedule_time.is_none());

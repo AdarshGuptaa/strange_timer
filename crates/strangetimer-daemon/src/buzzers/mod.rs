@@ -1,7 +1,9 @@
-pub mod audio;
 pub mod application;
+pub mod audio;
 pub mod bash;
+pub mod close_application;
 pub mod close_windows;
+pub mod focus_window;
 pub mod llm;
 pub mod url;
 pub mod video;
@@ -32,6 +34,19 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
             }
             close_windows::fire_close_windows(std::process::id());
         }
+        BuzzerAction::CloseApplication(name) => {
+            let confirmed = state.is_close_windows_confirmed().await;
+            if !confirmed {
+                eprintln!(
+                    "WARNING: close_app buzzer will close the {:?} application.\n\
+                     Run `strangetimer confirm-destructive` to enable it.",
+                    name
+                );
+                return;
+            }
+            close_application::fire_close_application(name);
+        }
+        BuzzerAction::FocusWindow(name) => focus_window::fire_focus_window(name),
         BuzzerAction::Llm { model, prompt } => {
             llm::fire_llm(model, prompt).await;
         }
