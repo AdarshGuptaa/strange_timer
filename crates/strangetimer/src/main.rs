@@ -22,7 +22,16 @@ fn main() {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Create { kind } => match kind {
-            CreateKind::Timer { name, rest } => commands::timers::create_timer(&name, &rest),
+            CreateKind::Timer {
+                name,
+                rest,
+                replace,
+                yes,
+                stop_running,
+                no_preview,
+            } => {
+                commands::timers::create_timer(&name, &rest, replace, yes, stop_running, no_preview)
+            }
             CreateKind::Buzzer(args) => commands::buzzers::create_buzzer(&args),
         },
         Command::Duplicate { kind } => match kind {
@@ -32,7 +41,9 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Delete { kind } => match kind {
             DeleteKind::Timer { name } => commands::timers::delete_timer(&name),
-            DeleteKind::Buzzer { name } => commands::buzzers::delete_buzzer(&name),
+            DeleteKind::Buzzer { name, cascade, yes } => {
+                commands::buzzers::delete_buzzer(&name, cascade, yes)
+            }
         },
         Command::Run(args) => commands::control::run(&args),
         Command::Pause(args) => commands::control::pause(&args.name),
@@ -65,10 +76,25 @@ fn run(cli: Cli) -> Result<()> {
             commands::install_completions::install_completions(shell)
         }
         Command::Watch => commands::watch::watch(),
-        Command::View { name, snapshot } => match name.as_str() {
-            "timers" => commands::view::view_timers(snapshot),
-            "buzzers" => commands::buzzers::view_buzzers(),
-            _ => commands::view::view_timer(&name, snapshot),
-        },
+        Command::View {
+            name,
+            buzzer_name,
+            snapshot,
+        } => {
+            if let Some(bn) = buzzer_name {
+                if name != "buzzer" {
+                    return Err(anyhow::anyhow!(
+                        "expected `view buzzer <name>` — got extra argument {bn:?}"
+                    ));
+                }
+                commands::buzzers::view_buzzer(&bn)
+            } else {
+                match name.as_str() {
+                    "timers" => commands::view::view_timers(snapshot),
+                    "buzzers" => commands::buzzers::view_buzzers(),
+                    _ => commands::view::view_timer(&name, snapshot),
+                }
+            }
+        }
     }
 }

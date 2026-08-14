@@ -229,9 +229,10 @@ fn render_overview(
     out.push_str(&style::header("ACTIVE RUNS"));
     out.push('\n');
     out.push_str(&format!(
-        "{left}{}{sep}{}{sep}{}{sep}{}{right}",
+        "{left}{}{sep}{}{sep}{}{sep}{}{sep}{}{right}",
         header_cell("TIMER", cols.name),
         header_cell("STATUS", cols.status),
+        header_cell("ELAPSED", cols.elapsed),
         header_cell("START → END", cols.time),
         header_cell("NEXT", cols.next),
     ));
@@ -320,33 +321,37 @@ fn render_overview(
 struct Columns {
     name: usize,
     status: usize,
+    elapsed: usize,
     time: usize,
     next: usize,
 }
 
 impl Columns {
     fn for_width(width: usize) -> Self {
-        // "│ " + a + " │ " + b + " │ " + c + " │ " + d + " │"
-        // = 2 borders + 3 separators(" │ ") + 2 spacing = 13 fixed columns.
-        let overhead = 13usize;
+        // "│ " + a + " │ " + b + " │ " + c + " │ " + d + " │ " + e + " │"
+        // = 2 borders + 4 separators(" │ ") + 2 spacing = 16 fixed columns.
+        let overhead = 16usize;
         let budget = width.saturating_sub(overhead);
 
         let name_min = 8usize;
         let status_min = 8usize;
+        let elapsed_min = 10usize;
         let time_min = 12usize;
         let next_min = 8usize;
-        let mins = name_min + status_min + time_min + next_min;
+        let mins = name_min + status_min + elapsed_min + time_min + next_min;
 
         if budget <= mins {
-            // Narrow terminal: shrink columns proportionally (with small
-            // floors) so the row still fits without wrapping.
+            // Narrow terminal: shrink columns proportionally (weights sum
+            // to 8, with small floors) so the row still fits exactly.
             let name = (budget * 3 / 8).max(4);
             let status = (budget / 8).max(3);
-            let time = (budget * 3 / 8).max(5);
+            let elapsed = (budget / 8).max(3);
+            let time = (budget * 2 / 8).max(5);
             let next = (budget / 8).max(3);
             return Columns {
                 name,
                 status,
+                elapsed,
                 time,
                 next,
             };
@@ -356,16 +361,19 @@ impl Columns {
         // Proportionally grow columns up to their maxima.
         let name_max = 20usize;
         let status_max = 12usize;
+        let elapsed_max = 12usize;
         let time_max = 22usize;
         let next_max = 18usize;
         let share = |max: usize, weight: usize| (extra * weight / 8).min(max);
         let name = name_min + share(name_max - name_min, 3);
         let status = status_min + share(status_max - status_min, 1);
-        let time = time_min + share(time_max - time_min, 3);
+        let elapsed = elapsed_min + share(elapsed_max - elapsed_min, 1);
+        let time = time_min + share(time_max - time_min, 2);
         let next = next_min + share(next_max - next_min, 1);
         Columns {
             name,
             status,
+            elapsed,
             time,
             next,
         }
@@ -561,10 +569,14 @@ fn render_block(
     };
     let start = run.started_at.format(start_fmt);
 
+    let elapsed_text = fmt_remaining(elapsed);
     let mut header = format!("{}  Start: {}", timer.name, start);
     if width >= 78 {
         let end = (run.started_at + total).format("%Y-%m-%d %H:%M:%S");
         header.push_str(&format!("  End: {end}"));
+    }
+    if width >= 68 {
+        header.push_str(&format!("  Elapsed: {elapsed_text}"));
     }
     if width >= 56 {
         header.push_str(&format!("  Mult: {mult}"));
@@ -804,6 +816,11 @@ fn fmt_offset(d: Duration) -> String {
     } else {
         format!("{secs}s")
     }
+}
+
+/// Public terminal-size accessor (used by the buzzer views).
+pub fn terminal_size_pub() -> (usize, usize) {
+    terminal_size()
 }
 
 /// Query the terminal size, falling back to 76x24 when it cannot be read.
@@ -1090,6 +1107,11 @@ mod tests {
             let cols = Columns::for_width(width);
             let t = &timers[0];
             let r = &runs[0];
+            // 5-column rows (TIMER|STATUS|ELAPSED|START→END|NEXT) must fit.
+            assert!(
+                cols.name + cols.status + cols.elapsed + cols.time + cols.next + 16 <= width,
+                "column sum exceeds width {width}"
+            );
             let detail = active_detail_row(t, r, Local::now(), &cols, false, false);
             assert!(
                 vis_width(&detail) <= width,

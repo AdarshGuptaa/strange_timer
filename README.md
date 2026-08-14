@@ -272,7 +272,7 @@ Any other command auto-starts the daemon if it isn't running
 
 | Command | Description |
 |---|---|
-| `strangetimer create timer <name> <offset> [<buzzer> ...]` | Create a timer. Offsets support `30s`, `5m`/`5min`, `2h`, `1D`, `1W` and compounds like `1h30m`. A bare offset uses the built-in `default_audio` buzzer. Offsets are **absolute** from run start; equal offsets fire together; unknown buzzer names are rejected. |
+| `strangetimer create timer <name> <offset> [<buzzer> ...] [--replace] [--yes] [--stop-running] [--no-preview]` | Create a timer (previews the definition). `--replace` swaps an existing definition after confirmation; `--yes` skips prompts; `--stop-running` also stops a live run. |
 | `strangetimer duplicate timer <source> [<new_name>]` | Clone a timer; defaults to `<source>_copy`. |
 | `strangetimer delete timer <name>` | Delete a definition (refused while a run is active). |
 | `strangetimer run <name> [-n count \| -i] [-t HH:MM] [-u]` | Start a run, optionally repeated or scheduled. `-u` pauses at every buzzer until acknowledged with `strangetimer resume <name>`. |
@@ -285,8 +285,10 @@ Any other command auto-starts the daemon if it isn't running
 | Command | Description |
 |---|---|
 | `strangetimer create buzzer <name> [--audio [path]] [--video [path]] [--application path] [--url url] [--bash path] [--close-app name] [--close-window id-or-title] [--focus-window name] [--llm model prompt_or_file]` | Create a buzzer. Multiple flags chain actions fired in sequence. |
-| `strangetimer delete buzzer <name>` | Delete a custom buzzer. |
-| `strangetimer view buzzers` | Table of the buzzer library. |
+| `strangetimer delete buzzer <name>` | Delete a custom buzzer (refused while referenced). |
+| `strangetimer delete buzzer <name> --cascade [--yes]` | Also delete every timer using the buzzer, after confirmation. |
+| `strangetimer view buzzers` | Buzzer library table with action targets, media durations, and timer/live-run reference counts. |
+| `strangetimer view buzzer <name>` | Detailed view of one buzzer (every action's target + duration, referencing timers). |
 | `strangetimer confirm-destructive` | Opt in to `close_windows` and `close_app` buzzers. |
 | `strangetimer examples [--install]` | List example buzzers for every action type, or install the file-free ones. |
 
@@ -300,8 +302,8 @@ as inactive: `delete timer` works after a timer finishes.
 
 | Command | Description |
 |---|---|
-| `strangetimer view timers` | Live table of active runs plus an inactive section for defined-but-not-running timers (animated in-place on the terminal alternate buffer, color-coded, re-lays out on resize; q/Ctrl+C exits). Add `--snapshot` for a persistent, scrollable printout. |
-| `strangetimer view <timer_name>` | Single-timer progress block + buzzer countdown table. Add `--snapshot` for static output. |
+| `strangetimer view timers` | Live table of active runs (TIMER \| STATUS \| ELAPSED \| START→END \| NEXT) plus an inactive section, animated in-place on the alternate buffer; q/Ctrl+C exits. Add `--snapshot` for a persistent, scrollable printout. |
+| `strangetimer view <timer_name>` | Single-timer progress block + buzzer countdown table (includes elapsed). Add `--snapshot` for static output. |
 | `strangetimer completions <bash\|zsh\|fish\|powershell>` | Print a shell completion script (dynamic: suggests your timer and buzzer names). |
 | `strangetimer completions --doctor` | Diagnose missing tab suggestions. |
 | `strangetimer install-completions [--shell <shell>]` | Install completions into your shell (detects `$SHELL`); <Tab> then suggests subcommands, flags, and your timer/buzzer names. Re-run after upgrades - scripts call `strangetimer` via `$PATH`. |

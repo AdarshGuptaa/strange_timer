@@ -441,7 +441,11 @@ async fn handle_connection(
 /// Apply a client message to the daemon state and produce the response.
 async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessage {
     match msg {
-        ClientMessage::CreateTimer { timer } => reply(state.add_timer(timer).await),
+        ClientMessage::CreateTimer {
+            timer,
+            replace,
+            stop_running,
+        } => reply(state.add_timer_options(timer, replace, stop_running).await),
         ClientMessage::DuplicateTimer { source, new_name } => {
             match state.duplicate_timer(&source, new_name).await {
                 Ok(name) => {
@@ -507,6 +511,23 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             None => ServerMessage::Error(format!("no timer named {name:?}")),
         },
         ClientMessage::GetBuzzers => ServerMessage::BuzzerList(state.get_buzzers().await),
+        ClientMessage::GetBuzzerInfo => ServerMessage::BuzzerInfoList(state.buzzer_infos().await),
+        ClientMessage::GetBuzzerDetail { name } => match state.buzzer_detail(&name).await {
+            Some(detail) => ServerMessage::BuzzerDetailInfo(detail),
+            None => ServerMessage::Error(format!("no buzzer named {name:?}")),
+        },
+        ClientMessage::DeleteBuzzerCascade { name } => {
+            match state.delete_buzzer_cascade(&name).await {
+                Ok(timers) => {
+                    info!(
+                        "cascade-deleted buzzer {name:?} and {} timers",
+                        timers.len()
+                    );
+                    ServerMessage::Ok
+                }
+                Err(e) => ServerMessage::Error(e.to_string()),
+            }
+        }
         ClientMessage::ConfirmDestructive => {
             state.set_close_windows_confirmed().await;
             ServerMessage::Ok
@@ -551,6 +572,9 @@ fn variant_name(msg: &ClientMessage) -> &'static str {
         ClientMessage::GetTimers => "GetTimers",
         ClientMessage::GetTimer { .. } => "GetTimer",
         ClientMessage::GetBuzzers => "GetBuzzers",
+        ClientMessage::GetBuzzerInfo => "GetBuzzerInfo",
+        ClientMessage::GetBuzzerDetail { .. } => "GetBuzzerDetail",
+        ClientMessage::DeleteBuzzerCascade { .. } => "DeleteBuzzerCascade",
         ClientMessage::ConfirmDestructive => "ConfirmDestructive",
         ClientMessage::Ping => "Ping",
         ClientMessage::Shutdown => "Shutdown",

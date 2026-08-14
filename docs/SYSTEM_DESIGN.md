@@ -534,6 +534,25 @@ runs at once (the legacy `interrupt_pending` marker is migrated on
 load). A restart keeps runs paused-pending without looping audio during
 downtime.
 
+### 8.5a Buzzer view metadata
+
+`GetBuzzerInfo` returns `BuzzerInfo` (per-action targets and media
+durations plus timer/live reference counts) and `GetBuzzerDetail`
+adds the referencing timers. Durations come from file headers — rodio
+`total_duration` for audio, a bounded `moov/mvhd` parser for MP4 — cached
+by path in `StateInner::media_cache`; embedded assets resolve through the
+same paths the dispatcher uses. `view timers` gained an `ELAPSED` column
+(counts upward for running runs, freezes while paused/pending, zero while
+scheduled) and `view <timer>` shows `Elapsed:` too.
+
+### 8.5b Confirmations and destructive flags
+
+`create timer --replace [--yes] [--stop-running]` and
+`delete buzzer --cascade [--yes]` are CLI-prompted; the daemon performs
+the final atomic checks under its lock (`add_timer_options`,
+`delete_buzzer_cascade`). Noninteractive stdin without `--yes` fails
+closed.
+
 ### 8.6a Window closing
 
 `--close-window <id-or-title>` closes one selected window: Linux prefers

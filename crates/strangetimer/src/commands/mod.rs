@@ -107,6 +107,33 @@ fn daemon_hint() -> String {
     )
 }
 
+/// Ask the user to confirm an action with `[y/N]`. `assume_yes` skips the
+/// prompt. Without a terminal, confirmation fails safely unless `--yes`
+/// was given (so scripts never hang).
+pub fn confirm(prompt: &str, assume_yes: bool) -> Result<bool> {
+    use std::io::{BufRead, Write};
+    if assume_yes {
+        return Ok(true);
+    }
+    use crossterm::tty::IsTty;
+    if !std::io::stdin().is_tty() {
+        return Err(anyhow::anyhow!(
+            "confirmation required — pass --yes to accept non-interactively"
+        ));
+    }
+    print!("{prompt} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line)?;
+    if read == 0 {
+        return Ok(false); // EOF counts as "no"
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// Unwrap a `ServerMessage`, turning `Error(e)` into a CLI error.
 pub fn ensure_ok(response: ServerMessage) -> Result<()> {
     match response {
@@ -126,6 +153,8 @@ fn variant_of(msg: &ServerMessage) -> &'static str {
         ServerMessage::TimerList { .. } => "TimerList",
         ServerMessage::TimerDetail { .. } => "TimerDetail",
         ServerMessage::BuzzerList(_) => "BuzzerList",
+        ServerMessage::BuzzerInfoList(_) => "BuzzerInfoList",
+        ServerMessage::BuzzerDetailInfo(_) => "BuzzerDetailInfo",
         ServerMessage::Status { .. } => "Status",
         ServerMessage::BuzzerEvents(_) => "BuzzerEvents",
         ServerMessage::DuplicateTimerOk { .. } => "DuplicateTimerOk",

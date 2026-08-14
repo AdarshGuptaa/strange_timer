@@ -25,6 +25,33 @@ pub struct Buzzer {
     pub builtin: bool,
 }
 
+/// Display metadata for a buzzer, computed by the daemon for the views:
+/// per-action targets and media durations, plus how many timer
+/// definitions and live runs reference the buzzer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuzzerInfo {
+    pub name: String,
+    pub actions: Vec<BuzzerAction>,
+    pub builtin: bool,
+    /// Display target per action (path, URL, model, "embedded chime", ...).
+    pub targets: Vec<String>,
+    /// Formatted duration per action (e.g. "0.80s") or None when unknown.
+    pub durations: Vec<Option<String>>,
+    /// Number of timer definitions referencing this buzzer (each timer
+    /// counts once, even with multiple slots).
+    pub timer_count: usize,
+    /// Number of live (non-completed) runs whose timer references it.
+    pub live_count: usize,
+}
+
+/// Full detail for `view buzzer NAME`: the info plus every referencing
+/// timer with its live-run status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuzzerDetail {
+    pub info: BuzzerInfo,
+    pub referencing_timers: Vec<(String, TimerStatus)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BuzzerAction {
     DefaultAudio,

@@ -29,6 +29,13 @@ pub fn socket_name() -> String {
 pub enum ClientMessage {
     CreateTimer {
         timer: Timer,
+        /// Replace an existing definition with the same name (atomic;
+        /// refused while a live run exists unless `stop_running`).
+        #[serde(default)]
+        replace: bool,
+        /// With `replace`: stop any live run of the timer first.
+        #[serde(default)]
+        stop_running: bool,
     },
     DuplicateTimer {
         source: String,
@@ -71,6 +78,17 @@ pub enum ClientMessage {
         name: String,
     },
     GetBuzzers,
+    /// Detailed buzzer list for `view buzzers` (targets, durations,
+    /// reference counts).
+    GetBuzzerInfo,
+    /// Detailed single buzzer for `view buzzer <name>`.
+    GetBuzzerDetail {
+        name: String,
+    },
+    /// Cascade-delete a buzzer and every timer definition referencing it.
+    DeleteBuzzerCascade {
+        name: String,
+    },
     /// Opt-in acknowledgement that the `close_windows` buzzer is allowed to
     /// close all other windows. Guarded by `state.close_windows_confirmed`.
     ConfirmDestructive,
@@ -115,6 +133,10 @@ pub enum ServerMessage {
         pending_interrupts: Vec<String>,
     },
     BuzzerList(Vec<Buzzer>),
+    /// Reply to `ClientMessage::GetBuzzerInfo`.
+    BuzzerInfoList(Vec<crate::model::BuzzerInfo>),
+    /// Reply to `ClientMessage::GetBuzzerDetail`.
+    BuzzerDetailInfo(crate::model::BuzzerDetail),
     /// Reply to `ClientMessage::Ping`: the daemon's process id and version.
     Status {
         pid: u32,

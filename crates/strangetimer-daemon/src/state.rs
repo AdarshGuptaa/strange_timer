@@ -1,9 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Local};
 use strangetimer_core::model::{
-    Buzzer, BuzzerEvent, DaemonState, FireEvent, RepeatMode, Timer, TimerRun, TimerStatus,
+    Buzzer, BuzzerAction, BuzzerDetail, BuzzerEvent, BuzzerInfo, DaemonState, FireEvent,
+    RepeatMode, Timer, TimerRun, TimerStatus,
 };
 use strangetimer_core::persistence::{save_buzzers, save_state, save_timers};
 use tokio::sync::Mutex;
@@ -31,6 +33,9 @@ pub struct StateInner {
     /// Ringing-event log for `strangetimer watch` (memory-only, bounded).
     pub events: VecDeque<BuzzerEvent>,
     pub next_event_id: u64,
+    /// Media-duration cache: path → formatted duration. Durations are
+    /// derived from file headers and never probed per view frame.
+    pub media_cache: HashMap<String, Option<String>>,
 }
 
 impl AppState {
@@ -43,6 +48,7 @@ impl AppState {
                 close_windows_confirmed: false,
                 events: VecDeque::new(),
                 next_event_id: 0,
+                media_cache: HashMap::new(),
             }),
             pending: std::sync::Mutex::new(Vec::new()),
         }
@@ -56,11 +62,38 @@ impl AppState {
 
     /// Add a timer definition. Refuses duplicate names (timer names are the
     /// identity key used by every other command).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn add_timer(&self, timer: Timer) -> Result<()> {
+        self.add_timer_options(timer, false, false).await
+    }
+
+    /// Create or atomically replace a timer definition. With `replace`,
+    /// an existing definition with the same name is swapped out — refused
+    /// while a live run exists unless `stop_running` is set.
+    pub async fn add_timer_options(
+        &self,
+        timer: Timer,
+        replace: bool,
+        stop_running: bool,
+    ) -> Result<()> {
         validate_name(&timer.name)?;
         let mut inner = self.inner.lock().await;
         if inner.timers.iter().any(|t| t.name == timer.name) {
-            return Err(anyhow!("a timer named {:?} already exists", timer.name));
+            if !replace {
+                return Err(anyhow!("a timer named {:?} already exists", timer.name));
+            }
+            if !stop_running
+                && inner
+                    .state
+                    .runs
+                    .iter()
+                    .any(|r| r.timer_name == timer.name && r.status != TimerStatus::Completed)
+            {
+                return Err(anyhow!(
+                    "timer {:?} has an active run — stop it first or pass --stop-running",
+                    timer.name
+                ));
+            }
         }
         // Reject unknown buzzer references up front instead of silently
         // swallowing the alarm at fire time.
@@ -76,8 +109,20 @@ impl AppState {
                 ));
             }
         }
+        if replace {
+            inner.timers.retain(|t| t.name != timer.name);
+            inner.state.runs.retain(|r| r.timer_name != timer.name);
+            if stop_running {
+                inner.state.pending_interrupts.retain(|p| p != &timer.name);
+                self.pending
+                    .lock()
+                    .expect("pending lock")
+                    .retain(|p| p != &timer.name);
+            }
+        }
         inner.timers.push(timer);
         save_timers(&inner.timers)?;
+        save_state(&inner.state)?;
         Ok(())
     }
 
@@ -460,6 +505,100 @@ impl AppState {
         inner.state.pending_fires.clone()
     }
 
+    // --- Buzzer view metadata ---
+
+    /// Build display metadata for every buzzer (targets, durations,
+    /// reference counts) for `view buzzers`.
+    pub async fn buzzer_infos(&self) -> Vec<BuzzerInfo> {
+        let mut inner = self.inner.lock().await;
+        let timers: Vec<Timer> = inner.timers.clone();
+        let runs: Vec<TimerRun> = inner.state.runs.clone();
+        let buzzers: Vec<Buzzer> = inner.buzzers.clone();
+        buzzers
+            .iter()
+            .map(|b| build_buzzer_info(&mut inner, b, &timers, &runs))
+            .collect()
+    }
+
+    /// Full detail for one buzzer for `view buzzer <name>`.
+    pub async fn buzzer_detail(&self, name: &str) -> Option<BuzzerDetail> {
+        let mut inner = self.inner.lock().await;
+        let timers: Vec<Timer> = inner.timers.clone();
+        let runs: Vec<TimerRun> = inner.state.runs.clone();
+        let buzzer = inner.buzzers.iter().find(|b| b.name == name)?.clone();
+        let info = build_buzzer_info(&mut inner, &buzzer, &timers, &runs);
+        let referencing = timers
+            .iter()
+            .filter(|t| t.buzzers.iter().any(|r| r.buzzer_name == name))
+            .map(|t| {
+                let status = runs
+                    .iter()
+                    .find(|r| r.timer_name == t.name && r.status != TimerStatus::Completed)
+                    .map(|r| r.status.clone())
+                    .unwrap_or(TimerStatus::Completed);
+                (t.name.clone(), status)
+            })
+            .collect();
+        Some(BuzzerDetail {
+            info,
+            referencing_timers: referencing,
+        })
+    }
+
+    /// Cascade-delete a buzzer and every timer definition referencing it.
+    /// Atomic under the state lock. Refuses built-ins and refuses when any
+    /// referencing timer has a live run.
+    pub async fn delete_buzzer_cascade(&self, name: &str) -> Result<Vec<String>> {
+        let mut inner = self.inner.lock().await;
+        let buzzer = inner
+            .buzzers
+            .iter()
+            .find(|b| b.name == name)
+            .ok_or_else(|| anyhow!("no buzzer named {name:?}"))?;
+        if buzzer.builtin {
+            return Err(anyhow!(
+                "{name:?} is a built-in buzzer and cannot be deleted"
+            ));
+        }
+
+        let referencing: Vec<String> = inner
+            .timers
+            .iter()
+            .filter(|t| t.buzzers.iter().any(|r| r.buzzer_name == name))
+            .map(|t| t.name.clone())
+            .collect();
+
+        if inner
+            .state
+            .runs
+            .iter()
+            .any(|r| r.status != TimerStatus::Completed && referencing.contains(&r.timer_name))
+        {
+            return Err(anyhow!(
+                "buzzer {name:?} is used by a timer with a live run — stop the runs first"
+            ));
+        }
+
+        inner.buzzers.retain(|b| b.name != name);
+        inner.timers.retain(|t| !referencing.contains(&t.name));
+        inner
+            .state
+            .runs
+            .retain(|r| !referencing.contains(&r.timer_name));
+        inner
+            .state
+            .pending_interrupts
+            .retain(|p| !referencing.contains(p));
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .retain(|p| !referencing.contains(p));
+        save_buzzers(&inner.buzzers)?;
+        save_timers(&inner.timers)?;
+        save_state(&inner.state)?;
+        Ok(referencing)
+    }
+
     // --- User-interrupt (`run -u`) ---
 
     /// Pause the run and mark it as awaiting acknowledgement. Called before
@@ -511,6 +650,106 @@ impl AppState {
     pub fn interrupt_pending_sync(&self) -> Vec<String> {
         self.pending.lock().expect("pending lock").clone()
     }
+}
+
+/// Build the display metadata for one buzzer. Media durations are
+/// derived from file headers (cached by path); counts come from a single
+/// snapshot of timers and runs.
+fn build_buzzer_info(
+    inner: &mut StateInner,
+    buzzer: &Buzzer,
+    timers: &[Timer],
+    runs: &[TimerRun],
+) -> BuzzerInfo {
+    let mut targets = Vec::new();
+    let mut durations = Vec::new();
+    for action in &buzzer.actions {
+        let (target, duration) = action_display(inner, action);
+        targets.push(target);
+        durations.push(duration);
+    }
+    let timer_count = timers
+        .iter()
+        .filter(|t| t.buzzers.iter().any(|r| r.buzzer_name == buzzer.name))
+        .count();
+    let live_count = runs
+        .iter()
+        .filter(|r| {
+            r.status != TimerStatus::Completed
+                && timers.iter().any(|t| {
+                    t.name == r.timer_name && t.buzzers.iter().any(|r| r.buzzer_name == buzzer.name)
+                })
+        })
+        .count();
+    BuzzerInfo {
+        name: buzzer.name.clone(),
+        actions: buzzer.actions.clone(),
+        builtin: buzzer.builtin,
+        targets,
+        durations,
+        timer_count,
+        live_count,
+    }
+}
+
+/// Display target + duration for one action.
+fn action_display(inner: &mut StateInner, action: &BuzzerAction) -> (String, Option<String>) {
+    match action {
+        BuzzerAction::DefaultAudio => ("embedded chime".to_string(), media_duration(inner, None)),
+        BuzzerAction::Audio(Some(p)) => (
+            p.display().to_string(),
+            media_duration(inner, Some(p.clone())),
+        ),
+        BuzzerAction::Audio(None) => ("embedded chime".to_string(), media_duration(inner, None)),
+        BuzzerAction::DefaultVideo => {
+            let path = crate::buzzers::video::builtin_video_path();
+            (
+                path.display().to_string(),
+                media_duration(inner, Some(path)),
+            )
+        }
+        BuzzerAction::Video(Some(p)) => (
+            p.display().to_string(),
+            media_duration(inner, Some(p.clone())),
+        ),
+        BuzzerAction::Video(None) => {
+            let path = crate::buzzers::video::builtin_video_path();
+            (
+                path.display().to_string(),
+                media_duration(inner, Some(path)),
+            )
+        }
+        BuzzerAction::Application(p) => (p.display().to_string(), None),
+        BuzzerAction::Url(u) => (u.clone(), None),
+        BuzzerAction::Bash(p) => (p.display().to_string(), None),
+        BuzzerAction::CloseAllWindows => ("all windows (deprecated)".to_string(), None),
+        BuzzerAction::CloseApplication(n) => (n.clone(), None),
+        BuzzerAction::CloseWindow(n) => (n.clone(), None),
+        BuzzerAction::FocusWindow(n) => (n.clone(), None),
+        BuzzerAction::Llm { model, .. } => (format!("model: {model}"), None),
+    }
+}
+
+/// Cached media duration for a local file (or the embedded chime when
+/// `path` is None). Uses rodio for audio and a bounded MP4 header parse
+/// for video.
+fn media_duration(inner: &mut StateInner, path: Option<PathBuf>) -> Option<String> {
+    if let Some(p) = &path {
+        let key = p.display().to_string();
+        if let Some(cached) = inner.media_cache.get(&key) {
+            return cached.clone();
+        }
+        let value = if key.to_ascii_lowercase().ends_with(".mp4") {
+            crate::buzzers::video::video_duration(p).map(crate::buzzers::video::fmt_duration_secs)
+        } else {
+            crate::buzzers::audio::audio_duration(Some(p))
+                .map(crate::buzzers::video::fmt_duration_secs)
+        };
+        inner.media_cache.insert(key, value.clone());
+        return value;
+    }
+    // Embedded chime (no path to cache).
+    crate::buzzers::audio::audio_duration(None).map(crate::buzzers::video::fmt_duration_secs)
 }
 
 /// Reject names that would corrupt terminal rendering or shell quoting.

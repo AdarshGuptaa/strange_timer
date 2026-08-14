@@ -498,10 +498,17 @@ fn close_app_and_focus_window_buzzers() {
         ],
     );
 
-    let out = expect_success(&guard, &["view", "buzzers"]);
+    // The summary table truncates long targets; the detailed buzzer view
+    // shows every action in full.
+    let out = expect_success(&guard, &["view", "buzzer", "tidyUp"]);
     assert!(out.contains("tidyUp"), "{out}");
     assert!(out.contains("close_app"), "{out}");
     assert!(out.contains("focus_window"), "{out}");
+    assert!(out.contains("firefox"), "{out}");
+    assert!(out.contains("Slack"), "{out}");
+
+    let out = expect_success(&guard, &["view", "buzzers"]);
+    assert!(out.contains("tidyUp"), "{out}");
     assert!(out.contains("confirm-destructive"), "{out}");
 }
 
@@ -1486,6 +1493,224 @@ fn live_view_uses_alternate_screen_and_leaves_one_snapshot() {
         !tail.contains("│ TIMER"),
         "live frame rows leaked into the primary screen:\n{tail:?}"
     );
+}
+
+/// Buzzer views carry action targets, media durations, and reference
+/// counts; `view buzzer NAME` shows full detail.
+#[test]
+fn buzzer_views_show_details_and_reference_counts() {
+    let guard = DaemonGuard::start(TestEnv::new("buzzer-detail"));
+    // Real media fixtures from the daemon crate so durations are real.
+    let audio = guard.env.dir.join("chime.wav");
+    let video = guard.env.dir.join("clip.mp4");
+    let daemon_assets =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../strangetimer-daemon/assets");
+    fs::copy(daemon_assets.join("chime.wav"), &audio).unwrap();
+    fs::copy(daemon_assets.join("default.mp4"), &video).unwrap();
+
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "alarm",
+            "--audio",
+            audio.to_str().unwrap(),
+            "--video",
+            video.to_str().unwrap(),
+            "--url",
+            "https://example.com/x",
+        ],
+    );
+    // Previews are static; suppress them for tidy assertions.
+    expect_success(
+        &guard,
+        &["create", "timer", "t1", "5m", "alarm", "10m", "alarm"],
+    );
+    expect_success(&guard, &["create", "timer", "t2", "1m", "alarm"]);
+    expect_success(&guard, &["run", "t2"]);
+
+    let out = expect_success(&guard, &["view", "buzzers"]);
+    assert!(out.contains("alarm"), "{out}");
+    assert!(out.contains("TIMERS"), "{out}");
+    assert!(out.contains("LIVE"), "{out}");
+    // t1 references alarm twice but counts once → 2 timers, 1 live run.
+    assert!(out.contains("2"), "expected 2 referencing timers:\n{out}");
+
+    let out = expect_success(&guard, &["view", "buzzer", "alarm"]);
+    assert!(out.contains("Buzzer:"), "{out}");
+    assert!(out.contains("chime.wav"), "{out}");
+    assert!(out.contains("clip.mp4"), "{out}");
+    assert!(out.contains("https://example.com/x"), "{out}");
+    assert!(
+        out.contains(".s") || out.contains("—"),
+        "durations shown:\n{out}"
+    );
+    assert!(out.contains("t1"), "referencing timer:\n{out}");
+    assert!(out.contains("t2"), "referencing timer:\n{out}");
+
+    let err = guard.cli(&["view", "buzzer", "nope"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("no buzzer named"),
+        "{}",
+        stderr_text(&err)
+    );
+}
+
+/// Creating a timer/buzzer previews the created definition; `--no-preview`
+/// suppresses it.
+#[test]
+fn creation_previews_and_no_preview_flag() {
+    let guard = DaemonGuard::start(TestEnv::new("previews"));
+
+    let out = expect_success(&guard, &["create", "timer", "t", "5m"]);
+    assert!(out.contains("Created timer"), "{out}");
+    assert!(
+        out.contains("Buzzer Name") || out.contains("no active run"),
+        "expected a preview of the created timer:\n{out}"
+    );
+
+    let out = expect_success(&guard, &["create", "timer", "u", "5m", "--no-preview"]);
+    assert!(out.contains("Created timer"), "{out}");
+    assert!(
+        !out.contains("no active run"),
+        "no preview expected:\n{out}"
+    );
+
+    let out = expect_success(
+        &guard,
+        &["create", "buzzer", "b", "--audio", "--no-preview"],
+    );
+    assert!(out.contains("Created buzzer"), "{out}");
+    assert!(
+        !out.contains("Buzzer:"),
+        "no buzzer preview expected:\n{out}"
+    );
+}
+
+/// `delete buzzer --cascade` removes the buzzer and its timers; live runs
+/// block it; plain delete of a referenced buzzer suggests --cascade.
+#[test]
+fn delete_buzzer_cascade_and_refusal() {
+    let guard = DaemonGuard::start(TestEnv::new("cascade"));
+    expect_success(
+        &guard,
+        &["create", "buzzer", "alarm", "--audio", "--no-preview"],
+    );
+    expect_success(
+        &guard,
+        &["create", "timer", "t1", "5m", "alarm", "--no-preview"],
+    );
+    expect_success(
+        &guard,
+        &["create", "timer", "t2", "10m", "alarm", "--no-preview"],
+    );
+
+    // Plain delete refuses and suggests --cascade.
+    let err = guard.cli(&["delete", "buzzer", "alarm"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("--cascade"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // Cascade with a live run refuses.
+    expect_success(&guard, &["run", "t1"]);
+    let err = guard.cli(&["delete", "buzzer", "alarm", "--cascade", "--yes"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("live run"),
+        "{}",
+        stderr_text(&err)
+    );
+    expect_success(&guard, &["stop", "t1"]);
+
+    // Noninteractive cascade without --yes fails safely (stdin is a pipe).
+    let err = guard.cli(&["delete", "buzzer", "alarm", "--cascade"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("--yes") || stderr_text(&err).contains("confirmation"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // Cascade with --yes deletes the buzzer and both timers.
+    let out = expect_success(&guard, &["delete", "buzzer", "alarm", "--cascade", "--yes"]);
+    assert!(out.contains("2"), "{out}");
+    let out = expect_success(&guard, &["view", "timers", "--snapshot"]);
+    assert!(out.contains("No timers currently running."), "{out}");
+}
+
+/// `create timer --replace` replaces an existing definition; live runs
+/// block it unless --stop-running is given.
+#[test]
+fn create_timer_replace_flow() {
+    let guard = DaemonGuard::start(TestEnv::new("replace"));
+
+    expect_success(&guard, &["create", "timer", "t", "5m", "--no-preview"]);
+
+    // Noninteractive duplicate without --yes fails safely.
+    let err = guard.cli(&["create", "timer", "t", "10m", "--no-preview"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("--yes") || stderr_text(&err).contains("confirmation"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // --replace --yes swaps the definition.
+    let out = expect_success(
+        &guard,
+        &[
+            "create",
+            "timer",
+            "t",
+            "10m",
+            "--replace",
+            "--yes",
+            "--no-preview",
+        ],
+    );
+    assert!(out.contains("Created timer"), "{out}");
+    let out = expect_success(&guard, &["view", "t", "--snapshot"]);
+    assert!(out.contains("10m"), "replaced definition:\n{out}");
+
+    // Replacing while a run is live is refused unless --stop-running.
+    expect_success(&guard, &["run", "t"]);
+    let err = guard.cli(&[
+        "create",
+        "timer",
+        "t",
+        "20m",
+        "--replace",
+        "--yes",
+        "--no-preview",
+    ]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("active run"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    let out = expect_success(
+        &guard,
+        &[
+            "create",
+            "timer",
+            "t",
+            "20m",
+            "--replace",
+            "--yes",
+            "--stop-running",
+            "--no-preview",
+        ],
+    );
+    assert!(out.contains("Created timer"), "{out}");
+    let out = expect_success(&guard, &["view", "t", "--snapshot"]);
+    assert!(out.contains("20m"), "{out}");
 }
 
 /// The generated bash completion suggests buzzers after a completed offset/// in `create timer`, and state-aware names for `resume`.

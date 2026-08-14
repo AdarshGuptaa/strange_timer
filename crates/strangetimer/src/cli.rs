@@ -226,10 +226,13 @@ pub enum Command {
     persistent view that stays in the terminal scrollback.")]
     View {
         /// `timers` for the live overview table, `buzzers` for the buzzer
-        /// library, or a timer name for its progress block + countdown
-        /// table.
+        /// library, `buzzer NAME` for one buzzer's details, or a timer
+        /// name for its progress block + countdown table.
         #[arg(add = ArgValueCompleter::new(candidates::view_targets))]
         name: String,
+        /// With `name = buzzer`: which buzzer to show.
+        #[arg(value_name = "BUZZER_NAME")]
+        buzzer_name: Option<String>,
         /// Print a static snapshot instead of the live dashboard; the
         /// output stays in the terminal scrollback.
         #[arg(long)]
@@ -304,6 +307,20 @@ pub enum CreateKind {
             add = ArgValueCompleter::new(candidates::CreateTimerCompleter)
         )]
         rest: Vec<String>,
+        /// Replace the existing definition with the same name (prompts
+        /// interactively unless `--yes` is given).
+        #[arg(long)]
+        replace: bool,
+        /// Non-interactive: accept the replacement (with `--replace`) or
+        /// the cascade deletion (with `--cascade`) without prompting.
+        #[arg(long)]
+        yes: bool,
+        /// With `--replace`: also stop any live run of the timer.
+        #[arg(long, requires = "replace")]
+        stop_running: bool,
+        /// Do not print the created-timer preview after creating it.
+        #[arg(long)]
+        no_preview: bool,
     },
     /// Create a custom buzzer. Multiple `--` flags chain actions.
     #[command(after_help = "Examples:\n\
@@ -361,6 +378,13 @@ pub enum DeleteKind {
     Buzzer {
         #[arg(add = ArgValueCompleter::new(candidates::deletable_buzzer_names))]
         name: String,
+        /// Also delete every timer definition that references this buzzer
+        /// (prompts interactively unless `--yes` is given).
+        #[arg(long)]
+        cascade: bool,
+        /// Non-interactive: accept the cascade deletion without prompting.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -437,4 +461,7 @@ pub struct CreateBuzzerArgs {
     /// file path at fire time.
     #[arg(long, num_args = 2, value_names = ["MODEL", "PROMPT_OR_FILE"])]
     pub llm: Option<Vec<String>>,
+    /// Do not print the created-buzzer preview after creating it.
+    #[arg(long)]
+    pub no_preview: bool,
 }

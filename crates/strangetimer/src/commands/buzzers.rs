@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{Buzzer, BuzzerAction, LlmPromptSource};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::cli::CreateBuzzerArgs;
-use crate::commands::{ensure_ok, send_and_receive};
+use crate::commands::{confirm, ensure_ok, send_and_receive};
 use crate::style;
 
 /// `strangetimer create buzzer <name> [--audio [path]] [--video [path]]
@@ -24,23 +25,84 @@ pub fn create_buzzer(args: &CreateBuzzerArgs) -> Result<()> {
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
     }
+
+    // Show the created definition unless disabled.
+    if !args.no_preview {
+        view_buzzer(&args.name)?;
+    }
     Ok(())
 }
 
-/// `strangetimer delete buzzer <name>`
-pub fn delete_buzzer(name: &str) -> Result<()> {
-    ensure_ok(send_and_receive(&ClientMessage::DeleteBuzzer {
+/// `strangetimer delete buzzer <name> [--cascade] [--yes]`
+pub fn delete_buzzer(name: &str, cascade: bool, yes: bool) -> Result<()> {
+    if cascade {
+        // Fetch the referencing timers so the user can confirm the blast
+        // radius before anything is deleted.
+        let detail = match send_and_receive(&ClientMessage::GetBuzzerDetail {
+            name: name.to_string(),
+        })? {
+            ServerMessage::BuzzerDetailInfo(d) => d,
+            ServerMessage::Error(e) => return Err(anyhow!(e)),
+            other => return Err(anyhow!("unexpected daemon response: {other:?}")),
+        };
+        if detail.referencing_timers.is_empty() {
+            ensure_ok(send_and_receive(&ClientMessage::DeleteBuzzer {
+                name: name.to_string(),
+            })?)?;
+            println!("Deleted buzzer {}.", style::name(name));
+            return Ok(());
+        }
+        let names: Vec<&str> = detail
+            .referencing_timers
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let ok = confirm(
+            &format!(
+                "Buzzer {name:?} is used by timers: {}. Delete the buzzer and these \
+                 timer definitions?",
+                names.join(", ")
+            ),
+            yes,
+        )?;
+        if !ok {
+            println!("Aborted — nothing was deleted.");
+            return Ok(());
+        }
+        ensure_ok(send_and_receive(&ClientMessage::DeleteBuzzerCascade {
+            name: name.to_string(),
+        })?)?;
+        println!(
+            "Deleted buzzer {} and its {} referencing timer definition(s).",
+            style::name(name),
+            detail.referencing_timers.len()
+        );
+        return Ok(());
+    }
+
+    let result = send_and_receive(&ClientMessage::DeleteBuzzer {
         name: name.to_string(),
-    })?)?;
+    });
+    if let Err(e) = result.and_then(ensure_ok) {
+        if e.to_string().contains("referenced") {
+            return Err(anyhow!(
+                "{} — use `delete buzzer {name} --cascade` to also delete the \
+                 timers using it",
+                e
+            ));
+        }
+        return Err(e);
+    }
     println!("Deleted buzzer {}.", style::name(name));
     Ok(())
 }
 
-/// `strangetimer view buzzers`
+/// `strangetimer view buzzers` — summary table with targets, durations and
+/// reference counts.
 pub fn view_buzzers() -> Result<()> {
-    let response = send_and_receive(&ClientMessage::GetBuzzers)?;
+    let response = send_and_receive(&ClientMessage::GetBuzzerInfo)?;
     let buzzers = match response {
-        ServerMessage::BuzzerList(b) => b,
+        ServerMessage::BuzzerInfoList(b) => b,
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
     };
@@ -50,29 +112,63 @@ pub fn view_buzzers() -> Result<()> {
         return Ok(());
     }
 
+    let (width, _) = crate::commands::view::terminal_size_pub();
+    let header = |label: &str, w: usize| style::header(&pad(&truncate(label, w), w));
+
+    // Column widths derived from the terminal width (muted, readable).
+    let name_w = (width * 24 / 100).clamp(12, 28);
+    let actions_w = (width * 18 / 100).clamp(10, 20);
+    let target_w = (width * 30 / 100).clamp(12, 40);
+    let duration_w = 9usize;
+    let timers_w = 7usize;
+    let live_w = 5usize;
+    let builtin_w = 9usize;
+
+    let sep = style::rule(" │ ");
+    let left = style::rule("│ ");
+    let right = style::rule(" │");
+    let rule = style::rule(&"─".repeat(width));
+
     println!(
-        "{}",
-        style::header(&format!("{:<24} {:<32} {}", "Name", "Type(s)", "Built-in"))
+        "{left}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{right}",
+        header("NAME", name_w),
+        header("ACTIONS", actions_w),
+        header("TARGET/PATH", target_w),
+        header("DURATION", duration_w),
+        header("TIMERS", timers_w),
+        header("LIVE", live_w),
+        header("BUILTIN", builtin_w),
     );
-    println!("{}", style::rule(&"─".repeat(78)));
-    for buzzer in &buzzers {
-        let kinds = buzzer
-            .actions
-            .iter()
-            .map(action_label)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let tag = if buzzer.builtin {
+    println!("{rule}");
+
+    for b in &buzzers {
+        let kinds: Vec<String> = b.actions.iter().map(action_label).collect();
+        let target = b
+            .targets
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "—".to_string());
+        let duration = b
+            .durations
+            .first()
+            .and_then(|d| d.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let timer_s = format!("{}", b.timer_count);
+        let live_s = format!("{}", b.live_count);
+        let builtin = if b.builtin {
             style::builtin("[built-in]")
         } else {
             String::new()
         };
-        // Pad the plain text first so ANSI codes never break the columns.
         println!(
-            "{} {:<32} {}",
-            style::name(&format!("{:<24}", buzzer.name)),
-            kinds,
-            tag
+            "{left}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{right}",
+            style::name(&pad(&truncate(&b.name, name_w), name_w)),
+            pad(&truncate(&kinds.join(", "), actions_w), actions_w),
+            pad(&truncate_target(&target, target_w), target_w),
+            pad(&truncate(&duration, duration_w), duration_w),
+            pad(&timer_s, timers_w),
+            pad(&live_s, live_w),
+            builtin,
         );
     }
 
@@ -98,6 +194,133 @@ pub fn view_buzzers() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `strangetimer view buzzer <name>` — detailed view of one buzzer: every
+/// action with its target and duration, plus referencing timers.
+pub fn view_buzzer(name: &str) -> Result<()> {
+    let response = send_and_receive(&ClientMessage::GetBuzzerDetail {
+        name: name.to_string(),
+    })?;
+    let detail = match response {
+        ServerMessage::BuzzerDetailInfo(d) => d,
+        ServerMessage::Error(e) => return Err(anyhow!(e)),
+        other => return Err(anyhow!("unexpected daemon response: {other:?}")),
+    };
+
+    println!(
+        "{} {}",
+        style::header("Buzzer:"),
+        style::name(&detail.info.name)
+    );
+    println!(
+        "{} {}    {} {}    {} {}",
+        style::dim("Timers using it:"),
+        detail.info.timer_count,
+        style::dim("Live runs:"),
+        detail.info.live_count,
+        style::dim("Built-in:"),
+        if detail.info.builtin { "yes" } else { "no" },
+    );
+    println!();
+
+    let (width, _) = crate::commands::view::terminal_size_pub();
+    let type_w = 12usize;
+    let target_w = (width * 60 / 100).clamp(16, 60);
+    let duration_w = 10usize;
+    let sep = style::rule(" │ ");
+    let left = style::rule("│ ");
+    let right = style::rule(" │");
+    let rule = style::rule(&"─".repeat(width));
+    println!(
+        "{left}{}{sep}{}{sep}{}{right}",
+        style::header("TYPE"),
+        style::header("TARGET/PATH"),
+        style::header("DURATION"),
+    );
+    println!("{rule}");
+    for (i, action) in detail.info.actions.iter().enumerate() {
+        let ty = action_label(action);
+        let target = detail.info.targets.get(i).cloned().unwrap_or_default();
+        let duration = detail
+            .info
+            .durations
+            .get(i)
+            .and_then(|d| d.clone())
+            .unwrap_or_else(|| "—".to_string());
+        println!(
+            "{left}{}{sep}{}{sep}{}{right}",
+            pad(&truncate(&ty, type_w), type_w),
+            pad(&truncate_target(&target, target_w), target_w),
+            pad(&truncate(&duration, duration_w), duration_w),
+        );
+    }
+
+    if !detail.referencing_timers.is_empty() {
+        println!();
+        println!("{}", style::header("Referencing timers:"));
+        for (timer, status) in &detail.referencing_timers {
+            println!("  {} ({})", style::name(timer), status_label(status));
+        }
+    }
+
+    Ok(())
+}
+
+fn status_label(status: &strangetimer_core::model::TimerStatus) -> String {
+    match status {
+        strangetimer_core::model::TimerStatus::Running => "running".to_string(),
+        strangetimer_core::model::TimerStatus::Paused => "paused".to_string(),
+        strangetimer_core::model::TimerStatus::Scheduled => "scheduled".to_string(),
+        strangetimer_core::model::TimerStatus::Completed => "inactive".to_string(),
+    }
+}
+
+/// Truncate a target that looks like a path, keeping the filename tail so
+/// the useful part stays visible.
+fn truncate_target(s: &str, max: usize) -> String {
+    if s.width() <= max || !s.contains('/') {
+        return truncate(s, max);
+    }
+    let budget = max.saturating_sub(1);
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(budget)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
+}
+
+/// Truncate by terminal display width, appending `…` when cut.
+fn truncate(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Pad by terminal display width.
+fn pad(s: &str, max: usize) -> String {
+    let w = s.width();
+    if w >= max {
+        return s.to_string();
+    }
+    format!("{s}{}", " ".repeat(max - w))
 }
 
 /// Translate each `--flag` into a `BuzzerAction`, in command-line order.
@@ -151,7 +374,7 @@ fn build_actions(args: &CreateBuzzerArgs) -> Result<Vec<BuzzerAction>> {
         return Err(anyhow!(
             "a buzzer needs at least one action — pass one or more of \
              --audio, --video, --application, --url, --bash, --close-app, \
-             --focus-window, --llm"
+             --close-window, --focus-window, --llm"
         ));
     }
 
@@ -189,6 +412,7 @@ mod tests {
             close_window: None,
             focus_window: None,
             llm: None,
+            no_preview: true,
         }
     }
 

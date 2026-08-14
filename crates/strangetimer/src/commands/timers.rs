@@ -4,11 +4,18 @@ use strangetimer_core::duration_parse::parse_offset;
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{BuzzerRef, Timer};
 
-use crate::commands::{ensure_ok, send_and_receive};
+use crate::commands::{confirm, ensure_ok, send_and_receive};
 use crate::style;
 
 /// `strangetimer create timer <name> <offset> [<buzzer> [<offset> [<buzzer>]]...]`
-pub fn create_timer(name: &str, rest: &[String]) -> Result<()> {
+pub fn create_timer(
+    name: &str,
+    rest: &[String],
+    replace: bool,
+    yes: bool,
+    stop_running: bool,
+    no_preview: bool,
+) -> Result<()> {
     let buzzers = parse_buzzer_refs(rest)?;
 
     let timer = Timer {
@@ -17,10 +24,42 @@ pub fn create_timer(name: &str, rest: &[String]) -> Result<()> {
         created_at: Local::now(),
     };
 
-    match send_and_receive(&ClientMessage::CreateTimer { timer })? {
-        ServerMessage::Ok => println!("Created timer {}.{}", style::name(name), style::dim(".")),
+    // When the name already exists, ask before replacing (unless --replace
+    // was already given or --yes forces it).
+    let mut replace = replace;
+    let exists = matches!(
+        send_and_receive(&ClientMessage::GetTimer {
+            name: name.to_string()
+        })?,
+        ServerMessage::TimerDetail { .. }
+    );
+    if exists && !replace {
+        let ok = confirm(
+            &format!("Timer {name:?} already exists. Replace its definition?"),
+            yes,
+        )?;
+        if !ok {
+            println!("Aborted — existing timer left unchanged.");
+            return Ok(());
+        }
+        replace = true;
+    }
+
+    match send_and_receive(&ClientMessage::CreateTimer {
+        timer,
+        replace,
+        stop_running,
+    })? {
+        ServerMessage::Ok => {
+            println!("Created timer {}.{}", style::name(name), style::dim("."));
+        }
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
+    }
+
+    // Show the created definition (static snapshot) unless disabled.
+    if !no_preview {
+        crate::commands::view::view_timer(name, true)?;
     }
     Ok(())
 }

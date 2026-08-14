@@ -128,6 +128,27 @@ alternate-screen enter/leave sequences and that the primary buffer ends
 up with exactly one snapshot — the pipe-based tests never exercise the
 live TTY path.
 
+### Buzzer view metadata
+
+`view buzzers` shows per-buzzer action targets, media durations and
+reference counts; `view buzzer NAME` lists every chained action with its
+target/duration and the referencing timers. Durations are computed by the
+daemon from file headers (rodio `total_duration` for audio, a bounded
+`moov/mvhd` parser for MP4) and cached per path; built-in chime/video
+durations are derived from the packaged assets. Remote URLs show `—`.
+Reference counts count each timer definition once and live (non-completed)
+runs separately.
+
+### Interactive confirmations and destructive flags
+
+- `create timer --replace [--yes] [--stop-running]` replaces an existing
+  definition after a y/N prompt; noninteractive use requires `--yes`.
+- `delete buzzer --cascade [--yes]` deletes a buzzer and all timers using
+  it (refused while any of them has a live run); plain delete of a
+  referenced buzzer suggests `--cascade`.
+- Confirmations live in the CLI (`commands::confirm`): the daemon is
+  noninteractive and rechecks everything atomically under its state lock.
+
 ### Window closing and the fire outbox
 
 `--close-window <id-or-title>` closes a selected window (`wmctrl -i -c`

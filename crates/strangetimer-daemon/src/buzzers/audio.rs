@@ -69,6 +69,17 @@ fn load_audio(path: Option<&Path>) -> Option<Vec<u8>> {
     }
 }
 
+/// Best-effort duration of an audio source, decoded from its header
+/// without opening an audio device. `None` for built-in defaults means
+/// the embedded chime; the returned value is its decoded duration.
+pub fn audio_duration(path: Option<&Path>) -> Option<chrono::Duration> {
+    use rodio::Source;
+    let bytes = load_audio(path)?;
+    let decoder = rodio::Decoder::new(Cursor::new(bytes)).ok()?;
+    let std_dur = decoder.total_duration()?;
+    chrono::Duration::from_std(std_dur).ok()
+}
+
 /// Play WAV bytes to the default output device, blocking until finished.
 fn play_wav_bytes(bytes: Vec<u8>) -> anyhow::Result<()> {
     use rodio::{Decoder, OutputStream, Sink};
