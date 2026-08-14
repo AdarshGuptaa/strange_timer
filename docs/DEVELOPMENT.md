@@ -113,13 +113,20 @@ only then styled, so ANSI codes never shift columns and no line wraps.
 Each active timer spans two physical rows - a details row and a progress
 row with the bar on its own line.
 
-`view timers` animates on the **primary terminal screen** (no alternate
-buffer): the frame is drawn from the saved cursor position and cleared
-each tick, so output stays in normal scrollback. Only `q`/`Escape`/
-`Ctrl+C` exit; arrow keys and mouse scrolling are ignored. The daemon
-snapshot is refetched every ~1s (single-timer view too), and a final
-snapshot is printed on exit. `view timers --snapshot` prints a static,
-persistent view.
+`view timers` animates on the terminal **alternate buffer**: each frame is
+drawn from an explicit `(0, 0)` origin after `Clear(All)`, so updates
+happen in place and the primary screen's scrollback is never polluted
+(repeated `view timers` runs no longer stack copies of the table). Only
+`q`/`Escape`/`Ctrl+C` exit; arrow keys and mouse scrolling are ignored.
+The daemon snapshot is refetched every ~1s (single-timer view too), and
+on exit exactly one final snapshot is printed to the primary screen.
+`view timers --snapshot` prints a static, persistent view.
+
+The live path is covered by a real PTY e2e test (`live_view_uses_alternate_
+screen_and_leaves_one_snapshot`, via `portable-pty`): it asserts the
+alternate-screen enter/leave sequences and that the primary buffer ends
+up with exactly one snapshot — the pipe-based tests never exercise the
+live TTY path.
 
 ### Window closing and the fire outbox
 

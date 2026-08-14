@@ -25,3 +25,6 @@ dirs = { workspace = true }
 interprocess = { workspace = true }
 strangetimer-core = { path = "../strangetimer-core" }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+portable-pty = "0.9"

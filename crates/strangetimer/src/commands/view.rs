@@ -818,32 +818,33 @@ fn is_tty() -> bool {
     use crossterm::tty::IsTty;
     std::io::stdout().is_tty()
 }
-/// Run an animated render loop on the **primary** terminal screen (no
-/// alternate buffer): the frame is drawn from the cursor's saved position
-/// downward and cleared/re-drawn each tick, so the output stays visible in
-/// normal scrollback while it animates. Exit with `q`, Escape or Ctrl+C;
-/// arrow keys and mouse scrolling never exit. On exit the terminal is
-/// restored and `final_snapshot` is printed, leaving the last state in the
-/// scrollback.
+/// Run an animated render loop on the **terminal alternate buffer**:
+/// every frame is drawn from an explicit `(0, 0)` origin after clearing
+/// the whole buffer, so updates happen strictly in place — nothing is
+/// ever appended to the primary screen's scrollback. Exit with `q`,
+/// Escape or Ctrl+C; arrow keys and mouse scrolling never exit. On exit
+/// the alternate buffer is left cleanly and exactly one final snapshot
+/// is printed to the primary screen.
 fn animate<F, G>(mut render: F, final_snapshot: G) -> Result<()>
 where
     F: FnMut(usize) -> String,
     G: Fn() -> String,
 {
-    use crossterm::cursor::{RestorePosition, SavePosition};
+    use crossterm::cursor::MoveTo;
+    use crossterm::terminal::EnterAlternateScreen;
 
     let mut stdout = std::io::stdout();
 
     enable_raw_mode().map_err(|e| anyhow!("failed to enter raw mode: {e}"))?;
     let restore = TerminalGuard;
 
-    queue!(stdout, Hide, SavePosition)?;
+    queue!(stdout, EnterAlternateScreen, Hide)?;
     stdout.flush()?;
 
     let mut frame = 0usize;
     loop {
         // Reserve one line so the final printed line never triggers a
-        // terminal scroll mid-frame.
+        // scroll inside the alternate buffer.
         let (_, height) = terminal_size();
         let budget = height.saturating_sub(1).max(1);
         let body: Vec<String> = render(frame)
@@ -852,7 +853,9 @@ where
             .map(str::to_string)
             .collect();
 
-        queue!(stdout, RestorePosition, Clear(ClearType::FromCursorDown))?;
+        // Explicit origin + full clear: the previous frame is overwritten
+        // in place, never appended to scrollback.
+        queue!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
         for line in &body {
             queue!(stdout, Print(line), Print("\r\n"))?;
         }
@@ -871,8 +874,8 @@ where
                         break;
                     }
                     // Arrow keys / any other key: ignored — the view stays
-                    // up; the mouse wheel scrolls the primary buffer
-                    // natively (no mouse capture is enabled).
+                    // up. Mouse scrolling inside the alternate buffer does
+                    // not affect the primary screen.
                 }
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -881,22 +884,21 @@ where
         frame += 1;
     }
 
-    // Restore the cursor, then print the final snapshot so the display
-    // persists in scrollback instead of disappearing.
+    // Leave the alternate buffer, then print exactly one final snapshot
+    // so the display persists in the primary scrollback.
     drop(restore);
     println!("{}", final_snapshot());
     Ok(())
 }
 
-/// Restore the terminal on any exit path (including panics/errors): show
-/// the cursor, exit raw mode. No alternate screen to leave — the view
-/// lives on the primary screen.
+/// Restore the terminal on any exit path (including panics/errors): leave
+/// the alternate buffer, show the cursor, exit raw mode.
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        use crossterm::cursor::RestorePosition;
+        use crossterm::terminal::LeaveAlternateScreen;
         let mut stdout = std::io::stdout();
-        let _ = queue!(stdout, RestorePosition, Show);
+        let _ = queue!(stdout, Show, LeaveAlternateScreen);
         let _ = stdout.flush();
         let _ = disable_raw_mode();
     }

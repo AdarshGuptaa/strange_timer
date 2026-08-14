@@ -26,9 +26,10 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
   install to `strangetimer create timer …`. (`STRANGETIMER_AUTO_START=0`
   opts out.)
 - **Live progress view** — `strangetimer view timers` renders animated
-  progress bars with buzzer markers on a full-screen alternate display; it
-  re-lays out when you resize the terminal and restores your shell on
-  exit. Press any key to exit.
+  progress bars with buzzer markers on the terminal's **alternate
+  buffer**: every frame updates in place and nothing is appended to your
+  scrollback. `q`/`Ctrl+C` exits; `--snapshot` prints a persistent,
+  scrollable table instead.
 - **Crash recovery** — the daemon persists every state change atomically and
   fires any alarms that were missed while it was down or the machine was off.
 - **Autostart** — on first run the daemon registers itself as a system
@@ -99,8 +100,8 @@ strangetimer create timer workAndFun 45min 15min
 
 # Run it three times, and watch the live view (press any key to exit)
 strangetimer run workAndFun -n 3
-strangetimer view timers          # live table; q/Ctrl+C to exit
-strangetimer view timers --snapshot   # persistent, stays in scrollback
+strangetimer view timers          # live in-place table; q/Ctrl+C to exit
+strangetimer view timers --snapshot   # one static table, stays in scrollback
 
 # User-interrupt: pauses at each buzzer until you run `resume`
 strangetimer run workAndFun -u
@@ -299,7 +300,7 @@ as inactive: `delete timer` works after a timer finishes.
 
 | Command | Description |
 |---|---|
-| `strangetimer view timers` | Live table of active runs plus an inactive section for defined-but-not-running timers (animated in the terminal itself, color-coded, re-lays out on resize; q/Ctrl+C exits). Add `--snapshot` for a persistent, scrollable printout. |
+| `strangetimer view timers` | Live table of active runs plus an inactive section for defined-but-not-running timers (animated in-place on the terminal alternate buffer, color-coded, re-lays out on resize; q/Ctrl+C exits). Add `--snapshot` for a persistent, scrollable printout. |
 | `strangetimer view <timer_name>` | Single-timer progress block + buzzer countdown table. Add `--snapshot` for static output. |
 | `strangetimer completions <bash\|zsh\|fish\|powershell>` | Print a shell completion script (dynamic: suggests your timer and buzzer names). |
 | `strangetimer completions --doctor` | Diagnose missing tab suggestions. |

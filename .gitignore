@@ -3,3 +3,7 @@
 .idea/
 *.rs.bk
 .claude/
+
+# Local planning documents (kept out of the repository)
+plan.md
+claude.md

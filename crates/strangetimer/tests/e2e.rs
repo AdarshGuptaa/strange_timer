@@ -1392,6 +1392,102 @@ fn lifecycle_stacked_buzzers_same_offset() {
     assert!(out.contains("custom"), "{out}");
 }
 
+/// Live `view timers` must render in the terminal's alternate buffer and
+/// never append repeated table copies to the primary screen: after `q`,
+/// exactly ONE snapshot is left behind. Verified through a real PTY
+/// (the pipe-based tests never exercise the live TTY path).
+#[cfg(unix)]
+#[test]
+fn live_view_uses_alternate_screen_and_leaves_one_snapshot() {
+    use std::io::{BufRead, BufReader, Write};
+
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    let guard = DaemonGuard::start(TestEnv::new("pty-view"));
+    expect_success(&guard, &["create", "timer", "t", "1h"]);
+    expect_success(&guard, &["run", "t"]);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(cli_binary());
+    cmd.arg("view");
+    cmd.arg("timers");
+    cmd.env("STRANGETIMER_DATA_DIR", guard.env.dir.as_os_str());
+    cmd.env("STRANGETIMER_SOCKET", guard.env.socket.as_os_str());
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    drop(pair.slave);
+
+    let mut reader = BufReader::new(pair.master.try_clone_reader().unwrap());
+    let mut writer = pair.master.take_writer().unwrap();
+
+    // Wait for the first rendered frame (the live table is on the
+    // alternate screen at this point).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut first_line = String::new();
+    let mut saw_frame = false;
+    while Instant::now() < deadline {
+        first_line.clear();
+        if reader.read_line(&mut first_line).is_err() {
+            break;
+        }
+        if first_line.contains("TIMER") || first_line.contains("ACTIVE RUNS") {
+            saw_frame = true;
+            break;
+        }
+    }
+    assert!(saw_frame, "live view produced no frame: {first_line:?}");
+
+    // Let it animate for a few frames, then quit.
+    std::thread::sleep(Duration::from_millis(800));
+    writer.write_all(b"q").unwrap();
+    writer.flush().unwrap();
+
+    // Wait for exit and drain the remaining stream (the final snapshot).
+    let status = child.wait().unwrap();
+    assert!(status.success(), "view exited with {status:?}");
+    let mut rest = String::new();
+    let _ = reader.read_to_string(&mut rest);
+    let all = format!("{first_line}{rest}");
+
+    // Enter/leave the alternate buffer (DEC 1049 on unix terminals).
+    assert!(
+        all.contains("1049h") || all.contains("?1049h"),
+        "expected alternate-screen enter sequence:\n{all:?}"
+    );
+    let leave = if all.contains("1049l") {
+        "1049l"
+    } else if all.contains("?1049l") {
+        "?1049l"
+    } else {
+        ""
+    };
+    assert!(
+        !leave.is_empty(),
+        "expected alternate-screen leave:\n{all:?}"
+    );
+
+    // After the leave, exactly one final snapshot must be present — and
+    // no live frame rows may leak into the primary screen.
+    let tail = all.split(leave).last().unwrap_or("");
+    assert_eq!(
+        tail.matches("ACTIVE RUNS").count(),
+        1,
+        "final snapshot must appear exactly once in the primary screen:\n{tail:?}"
+    );
+    assert!(
+        !tail.contains("│ TIMER"),
+        "live frame rows leaked into the primary screen:\n{tail:?}"
+    );
+}
+
 /// The generated bash completion suggests buzzers after a completed offset/// in `create timer`, and state-aware names for `resume`.
 #[test]
 fn bash_completion_suggests_buzzers_and_paused_timers() {
