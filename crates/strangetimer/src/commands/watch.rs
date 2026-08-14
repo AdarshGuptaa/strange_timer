@@ -60,4 +60,7 @@ fn print_event(event: &BuzzerEvent) {
             ))
         );
     }
+    if let Some(outcome) = &event.outcome {
+        println!("{}", style::warn(&format!("   ({outcome})")));
+    }
 }

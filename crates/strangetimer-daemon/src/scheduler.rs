@@ -16,6 +16,9 @@ pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<FireEvent>) {
         ticker.tick().await;
         let fired = tick(Arc::clone(&state)).await;
         for event in fired {
+            // Persist before delivering: if the daemon dies between here
+            // and dispatch, startup replays the outbox.
+            state.add_pending_fire(event.clone()).await;
             if buzzer_tx.send(event).await.is_err() {
                 return; // receiver gone; nothing left to do
             }
@@ -148,6 +151,7 @@ mod tests {
                 last_saved_at: None,
                 interrupt_pending: None,
                 pending_interrupts: Vec::new(),
+                pending_fires: Vec::new(),
             },
         ))
     }

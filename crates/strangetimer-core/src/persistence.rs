@@ -79,8 +79,9 @@ fn read_json_or_default<T: serde::de::DeserializeOwned + serde::Serialize>(
             write_json_atomic(path, &default)?;
             Ok(default)
         }
-        Err(e) => Err(anyhow::Error::new(e))
-            .with_context(|| format!("failed to read {}", path.display())),
+        Err(e) => {
+            Err(anyhow::Error::new(e)).with_context(|| format!("failed to read {}", path.display()))
+        }
     }
 }
 
@@ -105,23 +106,12 @@ fn write_json_atomic<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> Re
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "data.json".to_string());
-    let tmp = dir.join(format!(
-        "{file_name}.{}.{}.tmp",
-        std::process::id(),
-        seq
-    ));
+    let tmp = dir.join(format!("{file_name}.{}.{}.tmp", std::process::id(), seq));
 
-    let bytes = serde_json::to_vec_pretty(value)
-        .context("failed to serialise value")?;
-    fs::write(&tmp, &bytes)
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| {
-        format!(
-            "failed to rename {} -> {}",
-            tmp.display(),
-            path.display()
-        )
-    })?;
+    let bytes = serde_json::to_vec_pretty(value).context("failed to serialise value")?;
+    fs::write(&tmp, &bytes).with_context(|| format!("failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -136,10 +126,8 @@ mod tests {
     fn init_test_env() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            let dir = std::env::temp_dir().join(format!(
-                "strangetimer-core-test-{}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("strangetimer-core-test-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             std::env::set_var("STRANGETIMER_DATA_DIR", &dir);
@@ -220,9 +208,14 @@ mod tests {
                 paused_at: None,
                 elapsed_before_pause: chrono::Duration::zero(),
                 fired_indices: vec![],
+                user_interrupt: false,
+                interrupt_focus: None,
             }],
             registered: true,
             last_saved_at: None,
+            interrupt_pending: None,
+            pending_interrupts: vec![],
+            pending_fires: vec![],
         };
         save_state(&state).unwrap();
         let loaded = load_state().unwrap();

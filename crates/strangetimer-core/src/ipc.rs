@@ -122,6 +122,11 @@ pub enum ServerMessage {
     },
     /// Reply to `ClientMessage::GetEvents`.
     BuzzerEvents(Vec<crate::model::BuzzerEvent>),
+    /// Reply to `DuplicateTimer`: the name actually created (the daemon
+    /// may suffix `_copy_2`, `_copy_3`, ... on collisions).
+    DuplicateTimerOk {
+        name: String,
+    },
 }
 
 /// Write a single length-prefixed JSON message to `stream`.

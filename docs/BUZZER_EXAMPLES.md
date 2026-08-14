@@ -18,6 +18,7 @@ daemon must be running (`strangetimer daemon start`).
 | `exampleVideoUrl` | Video streamed from the internet (default player/browser) | `strangetimer create buzzer exampleVideoUrl --url https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4` |
 | `exampleUrl` | Open a URL in the browser | `strangetimer create buzzer exampleUrl --url https://github.com/AdarshGuptaa/strange_timer` |
 | `exampleApplication` | Launch an application | `strangetimer create buzzer exampleApplication --application /usr/bin/gnome-calculator` |
+| (see below) | Close one selected window | `strangetimer create buzzer killMeeting --close-window 0x0123abcd` |
 | `exampleBash` | Run a shell script | `strangetimer create buzzer exampleBash --bash ~/notify.sh` |
 | `exampleChain` | Chained actions (audio + URL) | `strangetimer create buzzer exampleChain --audio --url https://github.com/AdarshGuptaa/strange_timer` |
 | `exampleLlm` | Local LLM announcement (Ollama) | `strangetimer create buzzer exampleLlm --llm llama3 "Announce that the timer finished and suggest a 5 minute break."` |
@@ -45,6 +46,10 @@ daemon must be running (`strangetimer daemon start`).
 - **`--close-app`** — closes a *specific* application by process name
   (e.g. `firefox`, `chrome`). **Destructive**: it requires the
   `strangetimer confirm-destructive` opt-in first, once per daemon session.
+- **`--close-window`** — closes a *selected* window by X11 window id or
+  title (e.g. `--close-window 0x0123abcd`). **Destructive**: also requires
+  `confirm-destructive`. The old all-windows `close_windows` buzzer is
+  deprecated and no longer runs — use this instead.
 - **`--focus-window`** — brings a window to the foreground by title
   substring or application name (Linux: `wmctrl`/`xdotool`, macOS:
   AppleScript, Windows: PowerShell `AppActivate`). Non-destructive.

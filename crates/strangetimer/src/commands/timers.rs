@@ -32,9 +32,8 @@ pub fn duplicate_timer(source: &str, new_name: Option<String>) -> Result<()> {
         new_name: new_name.clone(),
     })?;
 
-    let name = new_name.unwrap_or_else(|| format!("{source}_copy"));
     match response {
-        ServerMessage::Ok => println!(
+        ServerMessage::DuplicateTimerOk { name } => println!(
             "Duplicated timer {} as {}.",
             style::name(source),
             style::name(&name)

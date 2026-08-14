@@ -52,6 +52,38 @@ impl DaemonGuard {
         Self::start_with(env, &[])
     }
 
+    /// Like [`start_with`] but does NOT pre-seed `state.json` — used when
+    /// a test wants to control the persisted state itself.
+    fn start_no_seed(env: TestEnv, extra_env: &[(&str, &str)]) -> DaemonGuard {
+        let log = env.dir.join("daemon.log");
+        let mut cmd = Command::new(daemon_binary());
+        cmd.env("STRANGETIMER_DATA_DIR", &env.dir)
+            .env("STRANGETIMER_SOCKET", &env.socket);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .stdout(Stdio::from(fs::File::create(&log).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&log).unwrap()))
+            .spawn()
+            .expect("failed to spawn strangetimer-daemon");
+        let guard = DaemonGuard { child, env, log };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if Instant::now() > deadline {
+                panic!(
+                    "daemon did not start listening; log:\n{}",
+                    guard.log_contents()
+                );
+            }
+            if std::os::unix::net::UnixStream::connect(&guard.env.socket).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        guard
+    }
+
     /// Like [`start`] but with extra environment variables for the daemon
     /// (e.g. `STRANGETIMER_TEST_OPENER` seams).
     fn start_with(env: TestEnv, extra_env: &[(&str, &str)]) -> DaemonGuard {
@@ -146,6 +178,47 @@ fn expect_success(guard: &DaemonGuard, args: &[&str]) -> String {
         stderr_text(&out),
     );
     stdout_text(&out)
+}
+
+/// Poll `pred` every 100ms until it returns true or `timeout` elapses.
+/// Replaces fixed sleeps so lifecycle tests are timing-robust.
+fn wait_until(
+    guard: &DaemonGuard,
+    label: &str,
+    timeout: Duration,
+    pred: impl Fn(&DaemonGuard) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if pred(guard) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for {label}");
+}
+
+/// Wait until `view timers --snapshot` contains `needle`.
+fn wait_for_view(guard: &DaemonGuard, label: &str, needle: &str) {
+    wait_until(guard, label, Duration::from_secs(15), |g| {
+        let out = g.cli(&["view", "timers", "--snapshot"]);
+        out.status.success() && stdout_text(&out).contains(needle)
+    });
+}
+
+/// Wait until the file at `path` has at least `count` lines.
+fn wait_for_lines(path: &std::path::Path, label: &str, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if fs::read_to_string(path)
+            .map(|s| s.lines().count() >= count)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for {label} ({count} lines)");
 }
 
 #[test]
@@ -856,8 +929,470 @@ fn recovery_catches_up_multiple_missed_repetitions() {
     assert_eq!(log.lines().count(), 3, "expected 3 catch-up opens:\n{log}");
 }
 
-/// The generated bash completion suggests buzzers after a completed offset
-/// in `create timer`, and state-aware names for `resume`.
+/// A fired-but-undispatched event persisted in the outbox is replayed
+/// when the daemon restarts — a crash between scheduling and dispatch
+/// never loses the alarm.
+#[test]
+fn outbox_replays_undispatched_fires_on_restart() {
+    let env = TestEnv::new("outbox-replay");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+
+    // Seed a run-less state with one pending fire for default_video.
+    fs::write(
+        env.dir.join("state.json"),
+        r#"{
+          "runs": [],
+          "registered": true,
+          "last_saved_at": null,
+          "interrupt_pending": null,
+          "pending_interrupts": [],
+          "pending_fires": [
+            {
+              "timer_name": "x",
+              "buzzer_name": "default_video",
+              "buzzer_index": 0,
+              "repetition": 0
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let _guard = DaemonGuard::start_no_seed(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
+
+    // The daemon replays the outbox at startup → one video open.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&opens)
+            .map(|s| s.contains("default.mp4"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&opens).unwrap_or_default();
+    assert!(
+        log.contains("default.mp4"),
+        "outbox was not replayed:\n{log}"
+    );
+    assert_eq!(log.lines().count(), 1, "must replay exactly once:\n{log}");
+}
+
+/// `--close-window` issues a targeted close command through wmctrl, and
+/// the deprecated all-windows buzzer refuses to run.
+#[test]
+fn close_window_targets_one_window_and_close_all_is_deprecated() {
+    let env = TestEnv::new("close-window");
+    let wmctrl_log = env.dir.join("wmctrl.log");
+    let wmctrl = recording_script(&wmctrl_log, "");
+    // XDG_SESSION_TYPE="" tells the daemon this is an X11 session (this
+    // dev machine itself runs Wayland).
+    let guard = DaemonGuard::start_with(
+        env,
+        &[
+            ("STRANGETIMER_TEST_WMCTRL", wmctrl.to_str().unwrap()),
+            ("XDG_SESSION_TYPE", ""),
+        ],
+    );
+
+    expect_success(&guard, &["confirm-destructive"]);
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "killmeeting",
+            "--close-window",
+            "0x1234abcd",
+        ],
+    );
+    expect_success(&guard, &["create", "timer", "c", "1s", "killmeeting"]);
+    expect_success(&guard, &["run", "c"]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&wmctrl_log)
+            .map(|s| s.contains("0x1234abcd"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = fs::read_to_string(&wmctrl_log).unwrap_or_default();
+    // The recording script writes one argument per line.
+    let args: Vec<&str> = log.lines().collect();
+    assert!(
+        args.contains(&"-i") && args.contains(&"-c") && args.contains(&"0x1234abcd"),
+        "expected a targeted `wmctrl -i -c <id>` close:\n{log}"
+    );
+
+    // The deprecated all-windows buzzer no longer runs — the event is
+    // reported as blocked in `watch`.
+    expect_success(&guard, &["create", "timer", "d", "1s", "close_windows"]);
+    expect_success(&guard, &["run", "d"]);
+    let mut watcher = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
+        .env("STRANGETIMER_SOCKET", &guard.env.socket)
+        .args(["watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn watcher");
+    let stdout = watcher.stdout.take().unwrap();
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut buf = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let _ = reader.read_line(&mut buf);
+        if buf.contains("deprecated") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no deprecation outcome within 10s:\n{buf}"
+        );
+    }
+    assert!(buf.contains("blocked"), "{buf}");
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+}
+
+// --- Full lifecycle matrix (Prompt 51) ----------------------------------
+
+/// Default run (`-n 1` implied): creation → running → buzzing → completed
+/// (inactive) → deletable.
+#[test]
+fn lifecycle_default_once_runs_completes_and_deletes() {
+    let env = TestEnv::new("lifecycle-once");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
+
+    expect_success(&guard, &["create", "timer", "t", "1s", "default_video"]);
+    let out = expect_success(&guard, &["view", "timers", "--snapshot"]);
+    assert!(
+        out.contains("INACTIVE TIMERS"),
+        "definition listed inactive:\n{out}"
+    );
+    assert!(
+        !out.contains("ACTIVE RUNS") || !out.contains("run"),
+        "{out}"
+    );
+
+    expect_success(&guard, &["run", "t"]);
+    wait_for_view(&guard, "running state", "run ");
+    wait_for_lines(&opens, "video fire", 1);
+    wait_for_view(&guard, "inactive after completion", "INACTIVE TIMERS");
+
+    // Completed runs are terminal: deletion succeeds.
+    let out = expect_success(&guard, &["delete", "timer", "t"]);
+    assert!(out.contains("Deleted"), "{out}");
+    let out = expect_success(&guard, &["view", "timers", "--snapshot"]);
+    assert!(out.contains("No timers currently running."), "{out}");
+}
+
+/// `-n 5`: five fires, pause between repetitions, resume, completion.
+#[test]
+fn lifecycle_repeat_five_with_pause_between_repetitions() {
+    let env = TestEnv::new("lifecycle-repeat");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
+
+    expect_success(&guard, &["create", "timer", "t", "1s", "default_video"]);
+    expect_success(&guard, &["run", "t", "-n", "5"]);
+    wait_for_view(&guard, "repetition marker", "run ×5");
+
+    // First buzzer fires; pause between repetitions.
+    wait_for_lines(&opens, "first fire", 1);
+    expect_success(&guard, &["pause", "t"]);
+    wait_for_view(&guard, "paused state", "paused");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        fs::read_to_string(&opens)
+            .map(|s| s.lines().count())
+            .unwrap_or(0),
+        1,
+        "no fires while paused"
+    );
+
+    expect_success(&guard, &["resume", "t"]);
+    wait_for_lines(&opens, "all five fires", 5);
+    wait_for_view(&guard, "completed", "INACTIVE TIMERS");
+}
+
+/// `-u`: detached start, PENDING at the buzzer, resume acknowledgement,
+/// completion, deletion.
+#[test]
+fn lifecycle_user_interrupt_resume_and_delete() {
+    let guard = DaemonGuard::start(TestEnv::new("lifecycle-interrupt"));
+    expect_success(&guard, &["create", "timer", "t", "1s"]);
+    let out = expect_success(&guard, &["run", "t", "-u"]);
+    assert!(out.contains("resume t"), "{out}");
+    assert!(!out.contains("press Enter"), "{out}");
+
+    wait_for_view(&guard, "pending marker", "PENDING");
+    expect_success(&guard, &["resume", "t"]);
+    wait_for_view(&guard, "completed", "INACTIVE TIMERS");
+    expect_success(&guard, &["delete", "timer", "t"]);
+}
+
+/// Scheduled runs show `scheduled` and cannot be paused/resumed.
+#[test]
+fn lifecycle_scheduled_state() {
+    let guard = DaemonGuard::start(TestEnv::new("lifecycle-scheduled"));
+    expect_success(&guard, &["create", "timer", "t", "5m"]);
+
+    // Schedule a few minutes ahead — assert the Scheduled state only.
+    let now = chrono::Local::now();
+    let target = now + chrono::Duration::minutes(3);
+    let time_str = target.format("%H:%M").to_string();
+    let out = expect_success(&guard, &["run", "t", "-t", &time_str]);
+    assert!(out.contains("scheduled for"), "{out}");
+    wait_for_view(&guard, "scheduled status", "scheduled");
+
+    let err = guard.cli(&["pause", "t"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("cannot be paused"),
+        "{}",
+        stderr_text(&err)
+    );
+    let err = guard.cli(&["resume", "t"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("cannot be resumed"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // Still deletable? No — a Scheduled run is a live run.
+    let err = guard.cli(&["delete", "timer", "t"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("active run"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    expect_success(&guard, &["stop", "t"]);
+    expect_success(&guard, &["delete", "timer", "t"]);
+}
+
+/// Infinite runs stay active across many fires; `stop` ends them.
+#[test]
+fn lifecycle_infinite_run_and_stop() {
+    let env = TestEnv::new("lifecycle-infinite");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
+
+    expect_success(&guard, &["create", "timer", "t", "1s", "default_video"]);
+    expect_success(&guard, &["run", "t", "-i"]);
+    wait_for_view(&guard, "infinite marker", "run ∞");
+
+    wait_for_lines(&opens, "three infinite fires", 3);
+    let out = expect_success(&guard, &["view", "timers", "--snapshot"]);
+    assert!(
+        out.contains("ACTIVE RUNS"),
+        "still active after 3 fires:\n{out}"
+    );
+
+    expect_success(&guard, &["stop", "t"]);
+    wait_for_view(&guard, "stopped", "INACTIVE TIMERS");
+    expect_success(&guard, &["delete", "timer", "t"]);
+}
+
+/// View phases across one lifecycle: inactive → running → paused →
+/// resumed → completed.
+#[test]
+fn lifecycle_view_phase_matrix() {
+    let guard = DaemonGuard::start(TestEnv::new("lifecycle-phases"));
+    expect_success(&guard, &["create", "timer", "t", "30s"]);
+
+    // Before running: inactive.
+    let out = expect_success(&guard, &["view", "timers", "--snapshot"]);
+    assert!(
+        out.contains("INACTIVE TIMERS") && out.contains("t"),
+        "{out}"
+    );
+
+    // Running.
+    expect_success(&guard, &["run", "t"]);
+    wait_for_view(&guard, "running", "run ");
+    let out = expect_success(&guard, &["view", "t", "--snapshot"]);
+    assert!(out.contains("Next:"), "single-timer block:\n{out}");
+    assert!(out.contains("X-"), "progress bar:\n{out}");
+
+    // Paused.
+    expect_success(&guard, &["pause", "t"]);
+    wait_for_view(&guard, "paused", "paused");
+
+    // Resumed.
+    expect_success(&guard, &["resume", "t"]);
+    wait_for_view(&guard, "running again", "run ");
+
+    // Stopped → inactive, then deleted.
+    expect_success(&guard, &["stop", "t"]);
+    wait_for_view(&guard, "stopped inactive", "INACTIVE TIMERS");
+    expect_success(&guard, &["delete", "timer", "t"]);
+    let out = expect_success(&guard, &["view", "timers", "--snapshot"]);
+    assert!(out.contains("No timers currently running."), "{out}");
+}
+
+/// Duplicating works during run, pause, stop and completion; the copy
+/// never inherits a live run.
+#[test]
+fn lifecycle_duplicate_across_phases() {
+    let guard = DaemonGuard::start(TestEnv::new("lifecycle-duplicate"));
+    expect_success(&guard, &["create", "timer", "t", "30s"]);
+
+    expect_success(&guard, &["run", "t"]);
+    wait_for_view(&guard, "running", "run ");
+
+    // During the run.
+    expect_success(&guard, &["duplicate", "timer", "t", "run_copy"]);
+    let out = expect_success(&guard, &["view", "run_copy", "--snapshot"]);
+    assert!(out.contains("no active run"), "copy is not running:\n{out}");
+
+    // During pause.
+    expect_success(&guard, &["pause", "t"]);
+    wait_for_view(&guard, "paused", "paused");
+    expect_success(&guard, &["duplicate", "timer", "t", "pause_copy"]);
+
+    // After stop.
+    expect_success(&guard, &["stop", "t"]);
+    expect_success(&guard, &["duplicate", "timer", "t", "stopped_copy"]);
+
+    // Default suffixing.
+    let out = expect_success(&guard, &["duplicate", "timer", "t"]);
+    assert!(out.contains("t_copy"), "{out}");
+    let out = expect_success(&guard, &["duplicate", "timer", "t"]);
+    assert!(out.contains("t_copy_2"), "{out}");
+}
+
+/// Deletion is refused for live runs (running, paused, pending) and
+/// succeeds after stop or completion; missing timers error out.
+#[test]
+fn lifecycle_delete_matrix() {
+    let guard = DaemonGuard::start(TestEnv::new("lifecycle-delete"));
+
+    // Missing timer is an error.
+    let err = guard.cli(&["delete", "timer", "ghost"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("no timer named"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // Refused while running.
+    expect_success(&guard, &["create", "timer", "t", "30s"]);
+    expect_success(&guard, &["run", "t"]);
+    wait_for_view(&guard, "running", "run ");
+    let err = guard.cli(&["delete", "timer", "t"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("active run"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // Refused while paused.
+    expect_success(&guard, &["pause", "t"]);
+    wait_for_view(&guard, "paused", "paused");
+    let err = guard.cli(&["delete", "timer", "t"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("active run"),
+        "{}",
+        stderr_text(&err)
+    );
+
+    // Refused while pending user-interrupt.
+    expect_success(&guard, &["stop", "t"]);
+    expect_success(&guard, &["create", "timer", "u", "1s"]);
+    expect_success(&guard, &["run", "u", "-u"]);
+    wait_for_view(&guard, "pending", "PENDING");
+    let err = guard.cli(&["delete", "timer", "u"]);
+    assert!(!err.status.success());
+    assert!(
+        stderr_text(&err).contains("active run"),
+        "{}",
+        stderr_text(&err)
+    );
+    expect_success(&guard, &["resume", "u"]);
+    wait_until(&guard, "u completed", Duration::from_secs(15), |g| {
+        let out = g.cli(&["view", "u", "--snapshot"]);
+        out.status.success() && stdout_text(&out).contains("no active run")
+    });
+    expect_success(&guard, &["delete", "timer", "u"]);
+}
+
+/// Multiple buzzer types stack on one timer; equal offsets fire together.
+#[test]
+fn lifecycle_stacked_buzzers_same_offset() {
+    let env = TestEnv::new("lifecycle-stack");
+    let opens = env.dir.join("opens.log");
+    let opener = recording_script(&opens, "");
+    let guard = DaemonGuard::start_with(
+        env,
+        &[("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap())],
+    );
+
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "buzzer",
+            "custom",
+            "--audio",
+            "--url",
+            "https://example.com",
+        ],
+    );
+    expect_success(
+        &guard,
+        &[
+            "create",
+            "timer",
+            "t",
+            "1s",
+            "default_audio",
+            "1s",
+            "default_video",
+            "1s",
+            "custom",
+        ],
+    );
+
+    expect_success(&guard, &["run", "t"]);
+    // The video opener fires exactly once (all three share the 1s offset).
+    wait_for_lines(&opens, "video fire", 1);
+    wait_for_view(&guard, "completed", "INACTIVE TIMERS");
+
+    let out = expect_success(&guard, &["view", "t", "--snapshot"]);
+    assert!(out.contains("default_audio"), "{out}");
+    assert!(out.contains("default_video"), "{out}");
+    assert!(out.contains("custom"), "{out}");
+}
+
+/// The generated bash completion suggests buzzers after a completed offset/// in `create timer`, and state-aware names for `resume`.
 #[test]
 fn bash_completion_suggests_buzzers_and_paused_timers() {
     let guard = DaemonGuard::start(TestEnv::new("completion-suggest"));

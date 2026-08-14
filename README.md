@@ -15,8 +15,8 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
   `(offset, buzzer)` pairs, e.g. `45min` + `15min`, fired in sequence from
   the moment the timer starts.
 - **Buzzer library** — reusable alarms that chain multiple actions:
-  audio, video, application, URL, shell script, close a specific app,
-  focus a window, close-all-windows, or an LLM call through local Ollama.
+  audio, video, application, URL, shell script, close a selected window
+  or app, focus a window, or an LLM call through local Ollama.
 - **Repetition & scheduling** — run a timer `-n` times, infinitely (`-i`),
   or at a specific clock time (`-t HH:MM`).
 - **Managed daemon lifecycle** — `strangetimer daemon start/stop/status/
@@ -283,14 +283,17 @@ Any other command auto-starts the daemon if it isn't running
 
 | Command | Description |
 |---|---|
-| `strangetimer create buzzer <name> [--audio [path]] [--video [path]] [--application path] [--url url] [--bash path] [--close-app name] [--focus-window name] [--llm model prompt_or_file]` | Create a buzzer. Multiple flags chain actions fired in sequence. |
+| `strangetimer create buzzer <name> [--audio [path]] [--video [path]] [--application path] [--url url] [--bash path] [--close-app name] [--close-window id-or-title] [--focus-window name] [--llm model prompt_or_file]` | Create a buzzer. Multiple flags chain actions fired in sequence. |
 | `strangetimer delete buzzer <name>` | Delete a custom buzzer. |
 | `strangetimer view buzzers` | Table of the buzzer library. |
 | `strangetimer confirm-destructive` | Opt in to `close_windows` and `close_app` buzzers. |
 | `strangetimer examples [--install]` | List example buzzers for every action type, or install the file-free ones. |
 
 The built-in buzzers `default_audio`, `default_video` and `close_windows`
-are seeded on first run and cannot be deleted.
+are seeded on first run and cannot be deleted. `close_windows` (closing
+the entire desktop) is **deprecated** and refuses to run — create a
+`--close-window` or `--close-app` buzzer instead. Completed timers count
+as inactive: `delete timer` works after a timer finishes.
 
 ### Viewing & extras
 

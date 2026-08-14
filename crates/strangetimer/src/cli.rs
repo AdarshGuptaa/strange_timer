@@ -424,6 +424,10 @@ pub struct CreateBuzzerArgs {
     /// Destructive — requires `strangetimer confirm-destructive` first.
     #[arg(long)]
     pub close_app: Option<String>,
+    /// Close a selected window by X11 window id or window title.
+    /// Destructive — requires `strangetimer confirm-destructive` first.
+    #[arg(long)]
+    pub close_window: Option<String>,
     /// Bring a window matching the given title or application name to the
     /// foreground (e.g. `--focus-window firefox`).
     #[arg(long)]

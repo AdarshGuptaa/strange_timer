@@ -1191,6 +1191,81 @@ Problem: repeated `default_video` timers appeared to fire once.
 
 ---
 
+---
+
+## Prompt 48 — Targeted window closing
+
+```
+- New BuzzerAction::CloseWindow(String) + `--close-window <id-or-title>`
+  closes ONE selected window; Linux prefers wmctrl -i -c <id> (title via
+  wmctrl -c), falls back to xdotool windowclose; macOS via AppleScript;
+  Windows/Wayland report unsupported instead of pretending.
+- The legacy CloseAllWindows action is deserialized for compatibility but
+  refused at dispatch with a migration hint (closing the entire desktop
+  was too destructive); close_windows.rs module removed.
+- Confirmation (confirm-destructive) still required; the origin terminal
+  is never targeted.
+- Tests: wmctrl seam records -i -c <id>; watch reports the deprecated
+  action as blocked; Wayland skip covered.
+```
+
+## Prompt 49 — Completed-run deletion
+
+```
+- remove_timer guard now ignores Completed runs: `status != Completed`.
+- Missing timers now error ("no timer named") instead of succeeding.
+- Deleting a timer also removes its orphaned run records and pending
+  marker.
+- Tests: refused for running/paused/scheduled, allowed after completion,
+  missing-timer error, orphan cleanup.
+```
+
+## Prompt 50 — Durable fire outbox + event outcomes
+
+```
+- DaemonState.pending_fires persists each FireEvent before the fire task
+  receives it; the fire task removes it after dispatch; startup replays
+  the outbox, so a crash between scheduling and dispatch never loses an
+  alarm.
+- BuzzerEvent.outcome reports blocked actions (deprecated close_windows,
+  missing confirm-destructive, awaiting acknowledgement); watch prints
+  it.
+- Tests: seeded state.json pending_fires is replayed exactly once on
+  daemon start.
+```
+
+## Prompt 51 — Full lifecycle e2e matrix
+
+```
+- Polling helpers (wait_until / wait_for_view / wait_for_lines) replace
+  fixed sleeps.
+- Tests: default once (create → running → buzz → completed → delete);
+  -n 5 with pause between repetitions; -u PENDING + resume + delete;
+  scheduled state (pause/resume errors, delete refused, stop, delete);
+  infinite (-i) with 3+ fires then stop; view phase matrix (inactive →
+  running → paused → resumed → completed → deleted); duplicate during
+  run/pause/stop + default suffixing (t_copy, t_copy_2); delete matrix
+  (missing, running, paused, pending, after completion); stacked buzzers
+  with equal offsets fire together.
+- Fixed the duplicate-name display bug: the daemon now replies with the
+  actually-generated name (DuplicateTimerOk), so t_copy_2 is reported
+  correctly.
+```
+
+## Prompt 52 — Documentation and diagnostics
+
+```
+- Help/README/BUZZER_EXAMPLES document --close-window, close_windows
+  deprecation, absolute offsets, equal-offset stacking, and completed
+  timers being deletable.
+- DEVELOPMENT/SYSTEM_DESIGN cover the close_window backends, the fire
+  outbox, and event outcomes.
+- Diagnostics: `strangetimer completions --doctor`, `command -v wmctrl`,
+  `echo $XDG_SESSION_TYPE`.
+```
+
+---
+
 ## Build Order Summary
 
 ```
@@ -1243,6 +1318,12 @@ Prompt 44  — Exact-width table fixes (overhead 13, padded headers)
 Prompt 45  — Reliable terminal focus (window id, env, Wayland detect)
 Prompt 46  — Buzzer stacking validation + `strangetimer watch`
 Prompt 47  — Recovery catch-up of missed repetitions
+── /compact ──
+Prompt 48  — Targeted window closing (--close-window, deprecate all-windows)
+Prompt 49  — Completed-run deletion + missing-timer errors
+Prompt 50  — Durable fire outbox + event outcomes
+Prompt 51  — Full lifecycle e2e matrix (run/view/duplicate/delete phases)
+Prompt 52  — Documentation and diagnostics
 ```
 
-(Implemented in one pass; prompts 42-47 shipped together.)
+(Implemented in one pass; prompts 48-52 shipped together.)

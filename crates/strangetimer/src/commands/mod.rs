@@ -128,5 +128,6 @@ fn variant_of(msg: &ServerMessage) -> &'static str {
         ServerMessage::BuzzerList(_) => "BuzzerList",
         ServerMessage::Status { .. } => "Status",
         ServerMessage::BuzzerEvents(_) => "BuzzerEvents",
+        ServerMessage::DuplicateTimerOk { .. } => "DuplicateTimerOk",
     }
 }

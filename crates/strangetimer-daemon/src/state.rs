@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Local};
 use strangetimer_core::model::{
-    Buzzer, BuzzerEvent, DaemonState, RepeatMode, Timer, TimerRun, TimerStatus,
+    Buzzer, BuzzerEvent, DaemonState, FireEvent, RepeatMode, Timer, TimerRun, TimerStatus,
 };
 use strangetimer_core::persistence::{save_buzzers, save_state, save_timers};
 use tokio::sync::Mutex;
@@ -86,13 +86,33 @@ impl AppState {
     /// instance" — you must stop it first).
     pub async fn remove_timer(&self, name: &str) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        if inner.state.runs.iter().any(|r| r.timer_name == name) {
+        if !inner.timers.iter().any(|t| t.name == name) {
+            return Err(anyhow!("no timer named {name:?}"));
+        }
+        // Only *live* runs block deletion. Completed runs are terminal —
+        // the view already treats them as inactive, so they must not block
+        // (and are cleaned up with the definition).
+        if inner
+            .state
+            .runs
+            .iter()
+            .any(|r| r.timer_name == name && r.status != TimerStatus::Completed)
+        {
             return Err(anyhow!(
                 "timer {name:?} has an active run — stop it before deleting"
             ));
         }
         inner.timers.retain(|t| t.name != name);
+        inner.state.runs.retain(|r| r.timer_name != name);
+        if inner.state.pending_interrupts.iter().any(|p| p == name) {
+            inner.state.pending_interrupts.retain(|p| p != name);
+            self.pending
+                .lock()
+                .expect("pending lock")
+                .retain(|p| p != name);
+        }
         save_timers(&inner.timers)?;
+        save_state(&inner.state)?;
         Ok(())
     }
 
@@ -404,6 +424,42 @@ impl AppState {
         }
     }
 
+    // --- Fire outbox (durable dispatch) ---
+
+    /// Persist an event before handing it to the fire task. Removing it
+    /// after dispatch (`remove_pending_fire`) gives at-least-once
+    /// delivery across daemon restarts.
+    pub async fn add_pending_fire(&self, event: FireEvent) {
+        let mut inner = self.inner.lock().await;
+        inner.state.pending_fires.push(event);
+        if let Err(e) = save_state(&inner.state) {
+            warn!("failed to persist pending fire: {e:#}");
+        }
+    }
+
+    /// Remove the first matching undelivered event (by timer, buzzer index
+    /// and repetition) after it has been dispatched.
+    pub async fn remove_pending_fire(&self, event: &FireEvent) {
+        let mut inner = self.inner.lock().await;
+        let before = inner.state.pending_fires.len();
+        inner.state.pending_fires.retain(|e| {
+            !(e.timer_name == event.timer_name
+                && e.buzzer_index == event.buzzer_index
+                && e.repetition == event.repetition)
+        });
+        if inner.state.pending_fires.len() != before {
+            if let Err(e) = save_state(&inner.state) {
+                warn!("failed to persist outbox removal: {e:#}");
+            }
+        }
+    }
+
+    /// All undelivered events (replayed at startup).
+    pub async fn pending_fires(&self) -> Vec<FireEvent> {
+        let inner = self.inner.lock().await;
+        inner.state.pending_fires.clone()
+    }
+
     // --- User-interrupt (`run -u`) ---
 
     /// Pause the run and mark it as awaiting acknowledgement. Called before
@@ -524,6 +580,40 @@ mod tests {
         s.remove_run("t").await.unwrap();
         s.remove_timer("t").await.unwrap();
         assert!(s.get_timer("t").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_timer_after_completion_succeeds_and_cleans_runs() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
+
+        // Simulate the scheduler completing the run (as it does after the
+        // final buzzer fires).
+        let completed = {
+            let mut inner = s.lock().await;
+            inner.state.runs[0].status = TimerStatus::Completed;
+            inner.state.runs[0].fired_indices = vec![0];
+            inner.state.runs[0].clone()
+        };
+        s.update_state(|st| st.runs = vec![completed])
+            .await
+            .unwrap();
+
+        // A completed run is terminal: deletion must succeed and remove
+        // the orphaned run record.
+        s.remove_timer("t").await.unwrap();
+        assert!(s.get_timer("t").await.is_none());
+        assert!(s.get_run("t").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_missing_timer_is_an_error() {
+        let s = fresh_state();
+        let err = s.remove_timer("ghost").await.unwrap_err().to_string();
+        assert!(err.contains("no timer named"), "{err}");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@ pub mod application;
 pub mod audio;
 pub mod bash;
 pub mod close_application;
-pub mod close_windows;
+pub mod close_window;
 pub mod focus_window;
 pub mod llm;
 pub mod url;
@@ -24,15 +24,13 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
         BuzzerAction::Url(url) => url::fire_url(url),
         BuzzerAction::Bash(path) => bash::fire_bash(path),
         BuzzerAction::CloseAllWindows => {
-            let confirmed = state.is_close_windows_confirmed().await;
-            if !confirmed {
-                warn!(
-                    "WARNING: close_windows buzzer will close ALL open windows.\n\
-                     Run `strangetimer confirm-destructive` to enable it."
-                );
-                return;
-            }
-            close_windows::fire_close_windows(std::process::id());
+            // Deprecated (Prompt 48): closing the *entire* desktop is too
+            // destructive. Refuse with a migration hint instead.
+            warn!(
+                "the close_windows buzzer (close ALL windows) is deprecated and \
+                 will not run. Use `--close-window <id-or-title>` to close a \
+                 selected window, or `--close-app <name>` to close an application."
+            );
         }
         BuzzerAction::CloseApplication(name) => {
             let confirmed = state.is_close_windows_confirmed().await;
@@ -45,6 +43,17 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
                 return;
             }
             close_application::fire_close_application(name);
+        }
+        BuzzerAction::CloseWindow(target) => {
+            let confirmed = state.is_close_windows_confirmed().await;
+            if !confirmed {
+                warn!(
+                    "WARNING: close_window buzzer will close {target:?}.\n\
+                     Run `strangetimer confirm-destructive` to enable it."
+                );
+                return;
+            }
+            close_window::fire_close_window(target);
         }
         BuzzerAction::FocusWindow(name) => focus_window::fire_focus_window(name),
         BuzzerAction::Llm { model, prompt } => {

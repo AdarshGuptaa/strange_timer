@@ -80,7 +80,9 @@ pub fn view_buzzers() -> Result<()> {
         b.actions.iter().any(|a| {
             matches!(
                 a,
-                BuzzerAction::CloseAllWindows | BuzzerAction::CloseApplication(_)
+                BuzzerAction::CloseAllWindows
+                    | BuzzerAction::CloseApplication(_)
+                    | BuzzerAction::CloseWindow(_)
             )
         })
     }) {
@@ -88,9 +90,9 @@ pub fn view_buzzers() -> Result<()> {
         println!(
             "{}",
             style::warn(
-                "WARNING: the close_windows / close_app buzzers close windows \
-                 when they fire.\nRun `strangetimer confirm-destructive` to \
-                 enable them."
+                "WARNING: close_windows / close_app / close_window buzzers close \
+                 windows when they fire.\nRun `strangetimer confirm-destructive` \
+                 to enable them."
             )
         );
     }
@@ -128,6 +130,9 @@ fn build_actions(args: &CreateBuzzerArgs) -> Result<Vec<BuzzerAction>> {
     if let Some(app) = &args.close_app {
         actions.push(BuzzerAction::CloseApplication(app.clone()));
     }
+    if let Some(window) = &args.close_window {
+        actions.push(BuzzerAction::CloseWindow(window.clone()));
+    }
     if let Some(window) = &args.focus_window {
         actions.push(BuzzerAction::FocusWindow(window.clone()));
     }
@@ -162,6 +167,7 @@ fn action_label(action: &BuzzerAction) -> String {
         BuzzerAction::Url(_) => "url".to_string(),
         BuzzerAction::Bash(_) => "bash".to_string(),
         BuzzerAction::CloseApplication(_) => "close_app".to_string(),
+        BuzzerAction::CloseWindow(_) => "close_window".to_string(),
         BuzzerAction::FocusWindow(_) => "focus_window".to_string(),
         BuzzerAction::Llm { .. } => "llm".to_string(),
     }
@@ -180,6 +186,7 @@ mod tests {
             url: None,
             bash: None,
             close_app: None,
+            close_window: None,
             focus_window: None,
             llm: None,
         }

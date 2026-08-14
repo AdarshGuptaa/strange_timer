@@ -534,13 +534,33 @@ runs at once (the legacy `interrupt_pending` marker is migrated on
 load). A restart keeps runs paused-pending without looping audio during
 downtime.
 
+### 8.6a Window closing
+
+`--close-window <id-or-title>` closes one selected window: Linux prefers
+`wmctrl -i -c <id>` (title via `wmctrl -c`), falling back to `xdotool
+windowclose`; macOS uses AppleScript; Windows and Wayland report
+unsupported instead of pretending. The legacy `CloseAllWindows` action
+is deserialized for compatibility but refused at dispatch with a
+migration hint — closing the entire desktop was too destructive.
+`CloseApplication` remains for process-level closing.
+
+### 8.6b Fire outbox (durable dispatch)
+
+Before handing a `FireEvent` to the fire task, the scheduler persists it
+in `DaemonState.pending_fires`; the fire task removes it after dispatch.
+Startup replays any remaining entries, so a crash between scheduling and
+dispatch never loses an alarm. `BuzzerEvent.outcome` carries block
+reasons (deprecated action, missing confirmation, awaiting
+acknowledgement) surfaced by `strangetimer watch`.
+
 ### 8.7 Buzzer ringing events and watch
 
 The daemon keeps a bounded, memory-only `VecDeque<BuzzerEvent>` (id,
 timer, buzzer, types, fired_at, repetition, requires_ack) and answers
 `GetEvents { after_id }`. `strangetimer watch` polls it every 400ms and
 prints `<timer> ringing | <types> | <time>`, plus the
-`-> strangetimer resume <timer>` hint for user-interrupt runs. Events are
+`-> strangetimer resume <timer>` hint for user-interrupt runs and any
+`outcome` (blocked actions). Events are
 never emitted through the daemon logger, so they cannot corrupt
 interactive terminals; `after_id` makes watchers at-least-once without
 duplicates.
@@ -694,7 +714,7 @@ about and to test.
 | No audio device | rodio logs a playback error; the rest of the daemon is unaffected. |
 | Unknown buzzer name | Fire task logs `BUZZ: <name> — no such buzzer` instead of dying. |
 | Corrupt JSON | Persistence surfaces a descriptive parse error; daemon refuses to start (no silent data loss). |
-| Deleted timer still running | `delete timer` is refused while a run is active; stop first. |
+| Deleted timer still running | `delete timer` is refused while a *live* run is active (running/paused/scheduled/pending); stop first. Completed runs are terminal — deletion succeeds and cleans up the run record. |
 | `close_app` / `close_windows` not opted in | Action logs a warning and does nothing — never closes without `confirm-destructive`. |
 
 ---

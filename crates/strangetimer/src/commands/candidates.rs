@@ -241,6 +241,7 @@ fn action_label(action: &strangetimer_core::model::BuzzerAction) -> &'static str
         A::Url(_) => "url",
         A::Bash(_) => "bash",
         A::CloseApplication(_) => "close_app",
+        A::CloseWindow(_) => "close_window",
         A::FocusWindow(_) => "focus_window",
         A::Llm { .. } => "llm",
     }

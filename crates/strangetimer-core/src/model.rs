@@ -41,6 +41,10 @@ pub enum BuzzerAction {
     /// Destructive and gated behind `confirm-destructive` like
     /// `CloseAllWindows`; use `--close-app NAME`.
     CloseApplication(String),
+    /// Close a *selected* window by X11 window id or window title (e.g.
+    /// `--close-window 0x0123abcd` or `--close-window 'Meeting - Zoom'`).
+    /// Destructive and gated behind `confirm-destructive`.
+    CloseWindow(String),
     /// Bring a window matching a title substring or application name to the
     /// foreground. Non-destructive; use `--focus-window NAME`.
     FocusWindow(String),
@@ -62,6 +66,7 @@ impl BuzzerAction {
             BuzzerAction::Url(_) => "url",
             BuzzerAction::Bash(_) => "bash",
             BuzzerAction::CloseApplication(_) => "close_app",
+            BuzzerAction::CloseWindow(_) => "close_window",
             BuzzerAction::FocusWindow(_) => "focus_window",
             BuzzerAction::Llm { .. } => "llm",
         }
@@ -136,6 +141,10 @@ pub struct BuzzerEvent {
     /// True when the run is in user-interrupt mode and is now waiting for
     /// `strangetimer resume <timer>`.
     pub requires_ack: bool,
+    /// Dispatch outcome, when it was not a plain fire: e.g. blocked by
+    /// confirmation, or deprecated action refused.
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 /// What the daemon needs to bring the user's terminal back to the front
@@ -190,4 +199,10 @@ pub struct DaemonState {
     /// `resume` can still acknowledge them.
     #[serde(default)]
     pub pending_interrupts: Vec<String>,
+    /// Fired-but-not-yet-dispatched buzzer events (the fire outbox). The
+    /// scheduler persists an event here before handing it to the fire
+    /// task, which removes it after dispatch — so a daemon crash between
+    /// scheduling and dispatch never loses the alarm.
+    #[serde(default)]
+    pub pending_fires: Vec<FireEvent>,
 }

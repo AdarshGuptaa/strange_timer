@@ -121,6 +121,22 @@ snapshot is refetched every ~1s (single-timer view too), and a final
 snapshot is printed on exit. `view timers --snapshot` prints a static,
 persistent view.
 
+### Window closing and the fire outbox
+
+`--close-window <id-or-title>` closes a selected window (`wmctrl -i -c`
+on X11, `xdotool windowclose` fallback; AppleScript on macOS; reported
+unsupported on Windows/Wayland rather than failing silently). The old
+`close_windows` all-windows action is deprecated and refuses to run with
+a migration hint; `--close-app` handles process-level closing.
+
+The scheduler persists every fire in `DaemonState.pending_fires` (the
+outbox) before handing it to the fire task, which removes it after
+dispatch. A daemon crash between scheduling and dispatch therefore never
+loses the alarm: startup replays the outbox. `BuzzerEvent.outcome`
+reports why an action was blocked (deprecated action, missing
+confirmation, awaiting acknowledgement) and `strangetimer watch` prints
+it.
+
 ### Buzzer ringing events
 
 The daemon keeps a bounded, memory-only queue of `BuzzerEvent`s and

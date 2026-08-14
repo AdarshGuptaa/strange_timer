@@ -79,6 +79,9 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         while let Some(event) = buzzer_rx.recv().await {
             fire_buzzer(&event, Arc::clone(&fire_state)).await;
+            // Acknowledge the outbox entry so a restart never replays an
+            // already-dispatched alarm.
+            fire_state.remove_pending_fire(&event).await;
         }
     });
 
@@ -86,6 +89,15 @@ async fn main() -> Result<()> {
     //    last stopped fire any alarms that were missed during downtime, and
     //    scheduled runs whose time has passed start immediately.
     recover_runs(Arc::clone(&app_state), &buzzer_tx).await;
+
+    // Replay any fired-but-undispatched events from the durable outbox
+    // (a crash between scheduling and dispatch must not lose an alarm).
+    for event in app_state.pending_fires().await {
+        info!("replaying pending fire for {:?}", event.buzzer_name);
+        if buzzer_tx.send(event).await.is_err() {
+            break;
+        }
+    }
 
     // 6. Bind the IPC listener and serve until a shutdown signal arrives.
     let listener = bind_listener(&socket_name()).context("failed to bind IPC listener")?;
@@ -175,12 +187,40 @@ async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
         }
     }
 
-    // Announce the ringing so `strangetimer watch` can print it.
+    // Announce the ringing so `strangetimer watch` can print it, including
+    // why an action was blocked.
     let types: Vec<String> = buzzer
         .actions
         .iter()
         .map(|a| a.label().to_string())
         .collect();
+    let outcome = {
+        let confirmed = state.is_close_windows_confirmed().await;
+        let has_legacy = buzzer
+            .actions
+            .iter()
+            .any(|a| matches!(a, BuzzerAction::CloseAllWindows));
+        let has_close = buzzer.actions.iter().any(|a| {
+            matches!(
+                a,
+                BuzzerAction::CloseWindow(_) | BuzzerAction::CloseApplication(_)
+            )
+        });
+        if has_legacy {
+            Some(
+                "blocked: close_windows is deprecated — use --close-window or --close-app"
+                    .to_string(),
+            )
+        } else if has_close && !confirmed {
+            Some("blocked: requires `strangetimer confirm-destructive`".to_string())
+        } else if requires_ack {
+            Some(format!(
+                "awaiting acknowledgement: strangetimer resume {timer_name}"
+            ))
+        } else {
+            None
+        }
+    };
     state
         .push_event(BuzzerEvent {
             id: 0, // assigned by the daemon
@@ -190,6 +230,7 @@ async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
             fired_at: chrono::Local::now(),
             repetition: event.repetition,
             requires_ack,
+            outcome,
         })
         .await;
 }
@@ -405,7 +446,7 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             match state.duplicate_timer(&source, new_name).await {
                 Ok(name) => {
                     info!("duplicated {source:?} as {name:?}");
-                    ServerMessage::Ok
+                    ServerMessage::DuplicateTimerOk { name }
                 }
                 Err(e) => ServerMessage::Error(e.to_string()),
             }
