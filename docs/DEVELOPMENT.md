@@ -1,0 +1,133 @@
+# StrangeTimer — Developer Guide
+
+How to build, test, and extend StrangeTimer.
+
+## Prerequisites
+
+- Rust 1.75+ (stable toolchain via [rustup](https://rustup.rs))
+- For the full experience on Linux: `wmctrl` or `xdotool` (close_windows),
+  and [Ollama](https://ollama.com) for `--llm` buzzers.
+- A C/C++ system compiler is required to build the native crates
+  (rodio/alsa on Linux).
+
+## Building
+
+```sh
+cargo build --workspace            # debug binaries in target/debug/
+cargo build --release --workspace  # release binaries in target/release/
+```
+
+Binaries:
+
+```
+target/debug/strangetimer          CLI
+target/debug/strangetimer-daemon   background service
+```
+
+## Running
+
+```sh
+# Terminal 1: the daemon (runs in the foreground, logs to stderr)
+target/debug/strangetimer-daemon
+
+# Terminal 2: the CLI
+target/debug/strangetimer create timer workAndFun 45min 15min
+target/debug/strangetimer run workAndFun -n 3
+target/debug/strangetimer view timers     # press any key to exit the view
+```
+
+On first run the daemon registers itself for autostart (systemd/launchd/
+Task Scheduler). To stop the daemon: `Ctrl+C` (SIGTERM also works).
+
+### Isolated instances (for testing / demos)
+
+Both binaries honour two environment variables:
+
+```sh
+export STRANGETIMER_DATA_DIR=/tmp/mydemo      # where timers.json etc. live
+export STRANGETIMER_SOCKET=/tmp/mydemo.sock   # where the daemon listens
+```
+
+Useful to run a daemon without touching `~/.local/share/strangetimer` and
+to run multiple instances side by side.
+
+## Testing
+
+```sh
+cargo test --workspace        # unit + e2e tests (builds every binary first)
+cargo clippy --workspace --all-targets
+```
+
+The e2e suite (`crates/strangetimer/tests/e2e.rs`) spawns the real daemon
+binary and drives it with the real CLI over real IPC. Every test gets an
+isolated temp data dir and socket, and kills its daemon on teardown. It
+asserts on the daemon's stderr log (e.g. `BUZZ:` lines) and the CLI's
+stdout. `cargo test -p strangetimer --test e2e` runs just the e2e suite.
+
+Notes:
+
+- Tests must not run against a live daemon on the default socket — they
+  never use it (every test overrides the socket path).
+- The e2e tests take ~7s (they exercise real 500 ms scheduler ticks and
+  actual alarm firing).
+- If `strangetimer-daemon` is missing from `target/debug`, build the
+  workspace first: `cargo build --workspace`.
+
+## Project Layout
+
+```
+crates/
+  strangetimer/          CLI: clap tree in cli.rs, handlers in commands/
+  strangetimer-daemon/   state.rs (AppState), scheduler.rs (tick loop),
+                         buzzers/ (dispatch), platform.rs (OS integration),
+                         assets/ (built-in chime + video)
+  strangetimer-core/     model.rs, duration_parse.rs, persistence.rs, ipc.rs
+```
+
+## Extending
+
+### Adding a CLI command
+
+1. Add the variant to `Command` in `strangetimer/src/cli.rs` (clap derive).
+2. Add a handler in the relevant file under `strangetimer/src/commands/`.
+3. If the daemon must do something new, add a `ClientMessage` variant in
+   `strangetimer-core/src/ipc.rs` and a match arm in the daemon's
+   `handle_message` (`strangetimer-daemon/src/main.rs`). If it touches
+   state, put the logic on `AppState` and persist before returning.
+
+### Adding a buzzer action type
+
+1. Add the variant to `BuzzerAction` in `strangetimer-core/src/model.rs`.
+2. Add a dispatch arm in `strangetimer-daemon/src/buzzers/mod.rs` and a
+   module (or inline logic) implementing the side effect.
+3. If it takes CLI flags, extend `CreateBuzzerArgs` and
+   `build_actions` in `strangetimer/src/commands/buzzers.rs`.
+4. Add a label in `action_label` (same file) for the `view buzzers` table.
+
+### Changing persistence or the IPC protocol
+
+Both are in `strangetimer-core`; any shape change to the serialized types
+must be accompanied by a migration story (currently: none — wipe the data
+dir or bump the schema). Keep `write_json_atomic`'s unique-temp invariant
+(§4.3 of `docs/SYSTEM_DESIGN.md`) intact.
+
+### Testing checklist for new code
+
+- Unit tests alongside the implementation (scheduler `tick` is factored to
+  be testable without sleeps).
+- For anything observable across processes, add an e2e case to
+  `crates/strangetimer/tests/e2e.rs`.
+- Run `cargo test --workspace` and `cargo clippy --workspace --all-targets`.
+
+## Platform Notes
+
+| Area | Linux | macOS | Windows |
+|---|---|---|---|
+| IPC | `/tmp/strangetimer.sock` | `/tmp/strangetimer.sock` | named pipe `\\.\pipe\strangetimer` |
+| Data dir | `~/.local/share/strangetimer/` | `~/Library/Application Support/strangetimer/` | `%APPDATA%\strangetimer\` |
+| Autostart | systemd user unit + `systemctl --user enable --now` | launchd plist + `launchctl load` | `schtasks /Create /SC ONLOGON` |
+| Close windows | `wmctrl` → fallback `xdotool` | `osascript` | `taskkill` |
+| Media focus | stub (TODO) | stub (TODO) | stub (TODO) |
+
+Only Linux has been exercised in CI; macOS/Windows paths are implemented
+but untested — report issues if you hit them.

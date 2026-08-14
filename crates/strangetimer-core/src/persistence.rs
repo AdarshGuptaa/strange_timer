@@ -238,12 +238,24 @@ mod tests {
         init_test_env();
         save_timers(&[sample_timer()]).unwrap();
         let dir = data_dir();
-        let leftovers: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
-            .collect();
-        assert!(leftovers.is_empty(), "temporary files must be renamed away");
+        // Sibling tests may be mid-write (parallel); poll until the dir
+        // settles, then assert no temp files linger.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let leftovers = loop {
+            let left: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+                .collect();
+            if left.is_empty() || std::time::Instant::now() > deadline {
+                break left;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(
+            leftovers.is_empty(),
+            "temporary files must be renamed away: {leftovers:?}"
+        );
         // And the saved file parses.
         assert_eq!(load_timers().unwrap().len(), 1);
     }
