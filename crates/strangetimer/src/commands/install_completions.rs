@@ -27,17 +27,17 @@ pub fn install_completions(shell: Option<Shell>) -> Result<()> {
     };
 
     let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot resolve your home directory"))?;
-    install_to(shell, &home)
+    let script = script_for(shell);
+    install_to(shell, &home, &script)
 }
 
 /// Install the completion script under `home`. Split out for testing.
-fn install_to(shell: Shell, home: &Path) -> Result<()> {
-    let script = script_for(shell);
+fn install_to(shell: Shell, home: &Path, script: &str) -> Result<()> {
     match shell {
         Shell::Bash => {
             let dir = home.join(".local/share/bash-completion/completions");
             let path = dir.join("strangetimer");
-            write_script(&dir, &path, &script)?;
+            write_script(&dir, &path, script)?;
             println!(
                 "Installed bash completions to {}. They are picked up by \
                  new shell sessions automatically.",
@@ -47,7 +47,7 @@ fn install_to(shell: Shell, home: &Path) -> Result<()> {
         Shell::Fish => {
             let dir = home.join(".config/fish/completions");
             let path = dir.join("strangetimer.fish");
-            write_script(&dir, &path, &script)?;
+            write_script(&dir, &path, script)?;
             println!(
                 "Installed fish completions to {}. They are picked up by \
                  new shell sessions automatically.",
@@ -57,7 +57,7 @@ fn install_to(shell: Shell, home: &Path) -> Result<()> {
         Shell::Zsh => {
             let dir = home.join(".zfunc");
             let path = dir.join("_strangetimer");
-            write_script(&dir, &path, &script)?;
+            write_script(&dir, &path, script)?;
             println!("Installed zsh completions to {}.", path.display());
             if !zshrc_wired_for_zfunc(home) {
                 println!(
@@ -122,17 +122,17 @@ mod tests {
     #[test]
     fn bash_installs_to_bash_completion_dir() {
         let home = tmp_home("bash");
-        install_to(Shell::Bash, &home).unwrap();
+        install_to(Shell::Bash, &home, "canned-script").unwrap();
         let path = home.join(".local/share/bash-completion/completions/strangetimer");
         assert!(path.exists(), "missing {}", path.display());
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("_strangetimer"), "not a completion script");
+        assert_eq!(content, "canned-script");
     }
 
     #[test]
     fn fish_installs_to_fish_completions_dir() {
         let home = tmp_home("fish");
-        install_to(Shell::Fish, &home).unwrap();
+        install_to(Shell::Fish, &home, "canned-script").unwrap();
         let path = home.join(".config/fish/completions/strangetimer.fish");
         assert!(path.exists(), "missing {}", path.display());
     }
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn zsh_writes_script_and_reports_rc_wiring() {
         let home = tmp_home("zsh");
-        install_to(Shell::Zsh, &home).unwrap();
+        install_to(Shell::Zsh, &home, "canned-script").unwrap();
         assert!(home.join(".zfunc/_strangetimer").exists());
         assert!(!zshrc_wired_for_zfunc(&home));
         fs::write(home.join(".zshrc"), "fpath=(~/.zfunc $fpath)\n").unwrap();

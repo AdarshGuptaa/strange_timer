@@ -7,6 +7,7 @@ use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{Buzzer, BuzzerAction, LlmPromptSource};
 
 use crate::commands::send_and_receive;
+use crate::style;
 
 /// The project's GitHub page, used by the URL example buzzer.
 const PROJECT_URL: &str = "https://github.com/AdarshGuptaa/strange_timer";
@@ -85,21 +86,36 @@ fn examples() -> Vec<ExampleBuzzer> {
 
 /// `strangetimer examples` — print the table of examples.
 pub fn list_examples() -> Result<()> {
-    println!("Example buzzers — one per action type, plus a chained combo:");
+    println!(
+        "{}",
+        style::header("Example buzzers — one per action type, plus a chained combo:")
+    );
     println!();
     for ex in examples() {
-        println!("  {:<18} {}", ex.name, ex.description);
+        println!(
+            "  {} {}",
+            style::name(&format!("{:<18}", ex.name)),
+            ex.description
+        );
     }
     println!();
-    println!("Create any of them with the commands below, or install the");
-    println!("file-free ones automatically with `strangetimer examples --install`.");
+    println!(
+        "{}",
+        style::dim(
+            "Create any of them with the commands below, or install the file-free \
+         ones automatically with `strangetimer examples --install`."
+        )
+    );
     println!();
     for ex in examples() {
-        println!("{ex}");
+        println!("{}", style::accent(&ex.to_string()));
         println!("  {}", ex.command);
         println!();
     }
-    println!("See docs/BUZZER_EXAMPLES.md for a full guide with worked timers.");
+    println!(
+        "{}",
+        style::dim("See docs/BUZZER_EXAMPLES.md for a full guide with worked timers.")
+    );
     Ok(())
 }
 

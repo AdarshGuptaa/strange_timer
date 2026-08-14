@@ -47,6 +47,13 @@ pub enum ClientMessage {
         name: String,
         repeat: RepeatMode,
         schedule_time: Option<chrono::DateTime<chrono::Local>>,
+        /// `run -u/--userinterrupt`: pause at every buzzer until acked.
+        #[serde(default)]
+        user_interrupt: bool,
+        /// Terminal window captured at `run -u` time; the daemon focuses it
+        /// after buzzer actions so the user sees the prompt.
+        #[serde(default)]
+        interrupt_focus: Option<String>,
     },
     Pause {
         name: String,
@@ -86,10 +93,16 @@ pub enum ServerMessage {
     TimerList {
         timers: Vec<Timer>,
         runs: Vec<TimerRun>,
+        /// Timer currently awaiting a user-interrupt acknowledgement
+        /// (`run -u`), if any.
+        #[serde(default)]
+        interrupt_pending: Option<String>,
     },
     TimerDetail {
         timer: Timer,
         runs: Vec<TimerRun>,
+        #[serde(default)]
+        interrupt_pending: Option<String>,
     },
     BuzzerList(Vec<Buzzer>),
     /// Reply to `ClientMessage::Ping`: the daemon's process id and version.
@@ -158,6 +171,8 @@ mod tests {
             name: "workAndFun".to_string(),
             repeat: RepeatMode::Infinite,
             schedule_time: None,
+            user_interrupt: true,
+            interrupt_focus: Some("term".to_string()),
         };
         let mut buf: Vec<u8> = Vec::new();
         write_message(&mut buf, &original).unwrap();
@@ -167,10 +182,14 @@ mod tests {
                 name,
                 repeat,
                 schedule_time,
+                user_interrupt,
+                interrupt_focus,
             } => {
                 assert_eq!(name, "workAndFun");
                 assert!(matches!(repeat, RepeatMode::Infinite));
                 assert!(schedule_time.is_none());
+                assert!(user_interrupt);
+                assert_eq!(interrupt_focus.as_deref(), Some("term"));
             }
             other => panic!("unexpected variant: {:?}", other),
         }
@@ -185,12 +204,13 @@ mod tests {
                 created_at: chrono::Local::now(),
             },
             runs: vec![],
+            interrupt_pending: None,
         };
         let mut buf: Vec<u8> = Vec::new();
         write_message(&mut buf, &original).unwrap();
         let decoded: ServerMessage = read_message(&mut buf.as_slice()).unwrap();
         match decoded {
-            ServerMessage::TimerDetail { timer, runs } => {
+            ServerMessage::TimerDetail { timer, runs, .. } => {
                 assert_eq!(timer.name, "t");
                 assert!(runs.is_empty());
             }

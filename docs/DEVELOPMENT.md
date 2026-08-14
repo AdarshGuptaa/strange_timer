@@ -86,6 +86,43 @@ per-user location for your shell (bash-completion dir, fish completions,
 `~/.zfunc` for zsh, or prints the PowerShell profile line). `strangetimer
 completions <shell>` prints the raw script.
 
+Completions use the clap_complete **engine** (`unstable-dynamic` feature):
+the script calls back into the CLI binary, which answers with live
+candidates (`src/commands/candidates.rs`) — timer names, buzzer names,
+`view` targets — fetched from the daemon without auto-starting it (a down
+daemon means no candidates, never an error). To exercise it manually:
+
+```sh
+source <(strangetimer completions bash)
+COMP_WORDS=(strangetimer run ''); COMP_CWORD=2; _clap_complete_strangetimer ''
+echo "${COMPREPLY[*]}"
+```
+
+### Colored output
+
+`src/style.rs` centralises the muted Cosmic-like theme. Color is off when
+stdout is not a TTY, `NO_COLOR` is set, or `STRANGETIMER_COLOR=0`; set
+`STRANGETIMER_COLOR=always` to force it on (tests use this). `--help`
+uses the same palette via clap `Styles` in `cli.rs`.
+
+### User-interrupt mode (`run -u`)
+
+The run captures the active terminal window (`xdotool`/`osascript`,
+best-effort), `RunTimer` carries `user_interrupt` + `interrupt_focus`, and
+`TimerRun`/`DaemonState` persist them (serde defaults keep old state
+files working). On a buzzer fire the daemon's fire task:
+
+1. `begin_interrupt` — pauses the run and sets the pending marker
+   (`state.rs`), synchronously mirrored for background threads.
+2. dispatches actions: audio **loops** (`buzzers/audio.rs::fire_audio_until`)
+   until `resume` clears the marker; everything else fires once.
+3. focuses the captured terminal window afterwards.
+
+The attached CLI (`commands/control.rs::attach_interrupt`) polls
+`GetTimer`; when pending it prints the prompt and resumes on Enter.
+`strangetimer resume <name>` is the detached fallback; a daemon restart
+keeps the run paused-pending (no audio loops during downtime).
+
 ### Isolated instances (for testing / demos)
 
 Both binaries honour two environment variables:

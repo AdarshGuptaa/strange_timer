@@ -4,7 +4,7 @@
 //! Run with `cargo test --workspace` (builds every binary first).
 
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -198,13 +198,16 @@ fn view_timers_shows_active_runs_only() {
     assert!(out.contains("No timers currently running."));
 
     expect_success(&guard, &["create", "timer", "t", "1h"]);
+    expect_success(&guard, &["create", "timer", "unused", "25min"]);
     expect_success(&guard, &["run", "t", "-n", "3"]);
 
     let out = expect_success(&guard, &["view", "timers"]);
-    assert!(out.contains("t  Start:"), "{out}");
-    assert!(out.contains("Mult: 3"), "{out}");
-    assert!(out.contains("Next:"), "{out}");
+    assert!(out.contains("ACTIVE RUNS"), "{out}");
+    assert!(out.contains("│ TIMER"), "missing table header:\n{out}");
+    assert!(out.contains("run ×3"), "missing repetition marker:\n{out}");
     assert!(out.contains("X-"), "missing progress bar:\n{out}");
+    // The defined-but-not-running timer shows in the inactive section.
+    assert!(out.contains("1 buzzer"), "{out}");
 
     expect_success(&guard, &["stop", "t"]);
     let out = expect_success(&guard, &["view", "timers"]);
@@ -551,4 +554,67 @@ fn stop_does_not_auto_start() {
         stdout_text(&out)
     );
     let _ = fs::remove_dir_all(&env.dir);
+}
+
+/// `run -u` (user-interrupt): the run pauses at the buzzer, the attached
+/// CLI prompts, and Enter resumes it (which also stops any looping audio).
+#[test]
+fn user_interrupt_pauses_and_resumes_on_enter() {
+    let guard = DaemonGuard::start(TestEnv::new("user-interrupt"));
+    expect_success(&guard, &["create", "timer", "t", "2s"]);
+
+    // Spawn `run t -u` with a piped stdin so the test can "press Enter".
+    let mut child = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
+        .env("STRANGETIMER_SOCKET", &guard.env.socket)
+        .args(["run", "t", "-u"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn CLI");
+
+    // Wait for the interrupt prompt (the 2s buzzer fires quickly).
+    let stderr = child.stderr.take().unwrap();
+    let mut reader = std::io::BufReader::new(stderr);
+    let mut line = String::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).expect("read CLI stderr");
+        assert!(read > 0, "CLI exited before prompting");
+        if line.contains("press Enter to resume") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no interrupt prompt within 15s; last line: {line}"
+        );
+    }
+    assert!(line.contains("press Enter"), "{line}");
+
+    // The run is paused while awaiting acknowledgement (STATUS column).
+    let out = expect_success(&guard, &["view", "timers"]);
+    assert!(out.contains("paused"), "run should be paused:\n{out}");
+
+    // "Press Enter" → resume; the run then completes and the CLI exits.
+    child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut status = None;
+    while Instant::now() < deadline {
+        if let Some(s) = child.try_wait().unwrap() {
+            status = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let status = match status {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("CLI did not exit after Enter within 15s");
+        }
+    };
+    assert!(status.success(), "CLI exited with {status:?}");
 }

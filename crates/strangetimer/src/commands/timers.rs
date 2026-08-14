@@ -1,10 +1,11 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use chrono::Local;
 use strangetimer_core::duration_parse::parse_offset;
 use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{BuzzerRef, Timer};
 
 use crate::commands::{ensure_ok, send_and_receive};
+use crate::style;
 
 /// `strangetimer create timer <name> <offset> [<buzzer> [<offset> [<buzzer>]]...]`
 pub fn create_timer(name: &str, rest: &[String]) -> Result<()> {
@@ -17,7 +18,7 @@ pub fn create_timer(name: &str, rest: &[String]) -> Result<()> {
     };
 
     match send_and_receive(&ClientMessage::CreateTimer { timer })? {
-        ServerMessage::Ok => println!("Created timer {name:?}."),
+        ServerMessage::Ok => println!("Created timer {}.{}", style::name(name), style::dim(".")),
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
     }
@@ -33,7 +34,11 @@ pub fn duplicate_timer(source: &str, new_name: Option<String>) -> Result<()> {
 
     let name = new_name.unwrap_or_else(|| format!("{source}_copy"));
     match response {
-        ServerMessage::Ok => println!("Duplicated timer {source:?} as {name:?}."),
+        ServerMessage::Ok => println!(
+            "Duplicated timer {} as {}.",
+            style::name(source),
+            style::name(&name)
+        ),
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
     }
@@ -45,7 +50,7 @@ pub fn delete_timer(name: &str) -> Result<()> {
     ensure_ok(send_and_receive(&ClientMessage::DeleteTimer {
         name: name.to_string(),
     })?)?;
-    println!("Deleted timer {name:?}.");
+    println!("Deleted timer {}.", style::name(name));
     Ok(())
 }
 
@@ -124,17 +129,10 @@ mod tests {
 
     #[test]
     fn mixed_pairs() {
-        let refs = parse_buzzer_refs(&[
-            "5m".into(),
-            "alarmA".into(),
-            "10m".into(),
-            "alarmB".into(),
-        ])
-        .unwrap();
-        assert_eq!(
-            names(&refs),
-            vec![("alarmA", 300), ("alarmB", 600)]
-        );
+        let refs =
+            parse_buzzer_refs(&["5m".into(), "alarmA".into(), "10m".into(), "alarmB".into()])
+                .unwrap();
+        assert_eq!(names(&refs), vec![("alarmA", 300), ("alarmB", 600)]);
     }
 
     #[test]

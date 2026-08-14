@@ -52,3 +52,43 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
         }
     }
 }
+
+/// Dispatch the actions of a buzzer that belongs to a `run -u` run, which
+/// has already been paused and marked pending by `begin_interrupt`.
+///
+/// - Audio actions **loop** until the acknowledgement arrives (`resume`
+///   clears the pending marker), replaying roughly once per playback.
+/// - All other actions fire once, as usual.
+/// - After every action, the terminal window captured at run time is
+///   focused so the user lands back on the CLI prompt.
+pub async fn dispatch_interrupt(state: &AppState, actions: &[BuzzerAction], timer_name: &str) {
+    for action in actions {
+        match action {
+            BuzzerAction::DefaultAudio => {
+                audio::fire_audio_until(None, || pending_is(state, timer_name)).await
+            }
+            BuzzerAction::Audio(path) => {
+                audio::fire_audio_until(path.as_deref(), || pending_is(state, timer_name)).await
+            }
+            _ => dispatch(state, action).await,
+        }
+    }
+
+    // Return focus to the terminal the user ran `run -u` from.
+    let focus = {
+        let run = state.get_run(timer_name).await;
+        run.and_then(|r| r.interrupt_focus)
+    };
+    if let Some(window) = focus {
+        info!("user interrupt: focusing terminal {window:?}");
+        focus_window::fire_focus_window(&window);
+    }
+}
+
+/// Whether `timer_name` is still awaiting the interrupt acknowledgement.
+fn pending_is(state: &AppState, timer_name: &str) -> bool {
+    match state.interrupt_pending_sync() {
+        Some(pending) => pending == timer_name,
+        None => false,
+    }
+}

@@ -1,4 +1,5 @@
 pub mod buzzers;
+pub mod candidates;
 pub mod completions;
 pub mod control;
 pub mod daemon;
@@ -18,11 +19,24 @@ use strangetimer_core::ipc::{socket_name, ClientMessage, ServerMessage};
 /// and retry once (see [`auto_start`]). `daemon status` / `daemon stop`
 /// never auto-start — they must be able to report "not running".
 pub fn send_and_receive(msg: &ClientMessage) -> Result<ServerMessage> {
+    send_and_receive_opt(msg, true)
+}
+
+/// Like [`send_and_receive`] but never auto-starts the daemon — used by
+/// completion candidates, which must stay silent when the daemon is down.
+pub fn send_and_receive_no_autostart(msg: &ClientMessage) -> Result<ServerMessage> {
+    send_and_receive_opt(msg, false)
+}
+
+fn send_and_receive_opt(msg: &ClientMessage, auto_start: bool) -> Result<ServerMessage> {
     match try_connect() {
         Ok(conn) => exchange_on(conn, msg),
         Err(first_err) => {
-            if auto_start_enabled() && !is_lifecycle_command(msg) {
-                eprintln!("StrangeTimer daemon not running — starting it…");
+            if auto_start && auto_start_enabled() && !is_lifecycle_command(msg) {
+                eprintln!(
+                    "{}",
+                    crate::style::dim("StrangeTimer daemon not running — starting it…")
+                );
                 daemon::ensure_started(false)?;
                 let conn = try_connect().with_context(|| {
                     format!(

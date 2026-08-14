@@ -513,6 +513,23 @@ starts it (`enable` without `--now`, plist without `launchctl load`) —
 starting is the CLI's job, and having the daemon start itself from inside
 a just-spawned process raced it for the socket.
 
+### 8.6 User-interrupt mode (`run -u`)
+
+`run -u` is per-run opt-in: `RunTimer` carries `user_interrupt` and the
+captured `interrupt_focus` window; `TimerRun` persists both and
+`DaemonState::interrupt_pending` records the timer awaiting
+acknowledgement (serde defaults keep older state files readable).
+
+On a buzzer fire the fire task (which now receives `(buzzer, timer)`
+pairs over the scheduler channel) pauses the run via `begin_interrupt`,
+dispatches the actions — audio actions **loop** (`fire_audio_until`)
+until `resume` clears the pending marker, everything else fires once —
+and finally focuses the captured terminal window. The attached CLI polls
+`GetTimer` and prompts "press Enter to resume"; `strangetimer resume
+<name>` is the detached fallback and doubles as the acknowledgement. A
+restart keeps the run paused-pending without looping audio during
+downtime.
+
 ### 8.5 Logging
 
 `log.rs` appends every message (debug/info/warn) to `daemon.log` in the
@@ -568,12 +585,27 @@ re-lays out instead of exiting. Any key exits and restores the shell
 On a non-TTY stdout it prints the same layout as a static snapshot —
 useful for scripts and tests.
 
-The layout adapts to the width: timestamps shrink (`%Y-%m-%d %H:%M:%S` →
-`%H:%M`), the `End`/`Mult` fields drop out below thresholds, names and
-buzzer names truncate with `…`, the bar is capped at 40 cells (hidden
-below 12 columns), and below 30 columns each timer collapses to a
-one-line summary. Blocks are capped to the terminal height with a
-"+N more" line.
+The overview is a bordered table (muted `DarkGrey` rules, `DarkCyan`
+headers, color-coded statuses):
+
+```
+ACTIVE RUNS
+│ TIMER      │ STATUS    │ START → END     │ NEXT          │ PROGRESS
+───────────────────────────────────────────────────────────────────────
+│ workAndFun │ run ×3    │ 09:00 → 09:45   │ default_audio │ X-███▄██-X
+───────────────────────────────────────────────────────────────────────
+│ focusTest  │ —         │ total 25m       │ 1 buzzer      │ —
+```
+
+- **Active** rows are live runs sorted by next-buzzer time; **inactive**
+  rows are defined timers without a run, separated by a divider.
+- Column widths are derived from the terminal width each frame; cells
+  truncate with `…`; the bar is capped at 40 cells; below the table width
+  threshold everything collapses to a one-line-per-timer list.
+- Rows are capped to the terminal height with a "+N more" line.
+
+The table, buzzer library, command confirmations, prompts and help all
+share the muted Cosmic-like palette from `style.rs` (NO_COLOR-aware).
 
 Each block:
 

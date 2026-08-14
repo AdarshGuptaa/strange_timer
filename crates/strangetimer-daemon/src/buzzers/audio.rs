@@ -13,15 +13,9 @@ const BUILTIN_CHIME: &[u8] = include_bytes!("../../assets/chime.wav");
 /// background thread so the caller returns immediately. After starting
 /// playback, attempt to focus the media player window (platform-specific).
 pub fn fire_audio(path: Option<&Path>) {
-    let bytes = match path {
-        Some(p) => match std::fs::read(p) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!("cannot read audio file {}: {e}", p.display());
-                return;
-            }
-        },
-        None => BUILTIN_CHIME.to_vec(),
+    let bytes = match load_audio(path) {
+        Some(b) => b,
+        None => return,
     };
 
     thread::spawn(move || {
@@ -31,6 +25,48 @@ pub fn fire_audio(path: Option<&Path>) {
     });
 
     focus_media_window();
+}
+
+/// Replay the audio until `should_continue` turns false (user-interrupt
+/// mode): the sound loops with a short gap between replays, stopping as
+/// soon as the run's pending marker is cleared. Each replay happens on its
+/// own thread so a slow audio device never blocks the daemon.
+pub async fn fire_audio_until(path: Option<&Path>, should_continue: impl Fn() -> bool) {
+    let bytes = match load_audio(path) {
+        Some(b) => b,
+        None => return,
+    };
+
+    loop {
+        let bytes = bytes.clone();
+        thread::spawn(move || {
+            if let Err(e) = play_wav_bytes(bytes) {
+                warn!("audio playback failed: {e:#}");
+            }
+        });
+        // Give the (potentially long) playback room to finish before the
+        // next repetition, but keep polling so the loop stops promptly on
+        // acknowledgement.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !should_continue() {
+                return;
+            }
+        }
+    }
+}
+
+fn load_audio(path: Option<&Path>) -> Option<Vec<u8>> {
+    match path {
+        Some(p) => match std::fs::read(p) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                warn!("cannot read audio file {}: {e}", p.display());
+                None
+            }
+        },
+        None => Some(BUILTIN_CHIME.to_vec()),
+    }
 }
 
 /// Play WAV bytes to the default output device, blocking until finished.

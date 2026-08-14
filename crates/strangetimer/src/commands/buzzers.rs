@@ -6,6 +6,7 @@ use strangetimer_core::model::{Buzzer, BuzzerAction, LlmPromptSource};
 
 use crate::cli::CreateBuzzerArgs;
 use crate::commands::{ensure_ok, send_and_receive};
+use crate::style;
 
 /// `strangetimer create buzzer <name> [--audio [path]] [--video [path]]
 /// [--application path] [--url url] [--bash path] [--llm model prompt]`
@@ -19,7 +20,7 @@ pub fn create_buzzer(args: &CreateBuzzerArgs) -> Result<()> {
     };
 
     match send_and_receive(&ClientMessage::CreateBuzzer { buzzer })? {
-        ServerMessage::Ok => println!("Created buzzer {:?}.", args.name),
+        ServerMessage::Ok => println!("Created buzzer {}.", style::name(&args.name)),
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
     }
@@ -31,7 +32,7 @@ pub fn delete_buzzer(name: &str) -> Result<()> {
     ensure_ok(send_and_receive(&ClientMessage::DeleteBuzzer {
         name: name.to_string(),
     })?)?;
-    println!("Deleted buzzer {name:?}.");
+    println!("Deleted buzzer {}.", style::name(name));
     Ok(())
 }
 
@@ -49,8 +50,11 @@ pub fn view_buzzers() -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<32} Built-in", "Name", "Type(s)");
-    println!("{}", "─".repeat(78));
+    println!(
+        "{}",
+        style::header(&format!("{:<24} {:<32} {}", "Name", "Type(s)", "Built-in"))
+    );
+    println!("{}", style::rule(&"─".repeat(78)));
     for buzzer in &buzzers {
         let kinds = buzzer
             .actions
@@ -58,8 +62,18 @@ pub fn view_buzzers() -> Result<()> {
             .map(action_label)
             .collect::<Vec<_>>()
             .join(", ");
-        let tag = if buzzer.builtin { "[built-in]" } else { "" };
-        println!("{:<24} {:<32} {}", buzzer.name, kinds, tag);
+        let tag = if buzzer.builtin {
+            style::builtin("[built-in]")
+        } else {
+            String::new()
+        };
+        // Pad the plain text first so ANSI codes never break the columns.
+        println!(
+            "{} {:<32} {}",
+            style::name(&format!("{:<24}", buzzer.name)),
+            kinds,
+            tag
+        );
     }
 
     if buzzers.iter().any(|b| {
@@ -72,9 +86,12 @@ pub fn view_buzzers() -> Result<()> {
     }) {
         println!();
         println!(
-            "WARNING: the close_windows / close_app buzzers close windows \
-             when they fire.\nRun `strangetimer confirm-destructive` to \
-             enable them."
+            "{}",
+            style::warn(
+                "WARNING: the close_windows / close_app buzzers close windows \
+                 when they fire.\nRun `strangetimer confirm-destructive` to \
+                 enable them."
+            )
         );
     }
 

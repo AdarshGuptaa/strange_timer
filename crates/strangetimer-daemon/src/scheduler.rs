@@ -4,19 +4,20 @@ use chrono::Local;
 use strangetimer_core::model::{RepeatMode, TimerStatus};
 use strangetimer_core::persistence::save_state;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
 
 use crate::state::AppState;
 
 /// Run the scheduler forever: every 500ms, advance all Running runs and
-/// forward any buzzer names that became due to `buzzer_tx`.
-pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<String>) {
+/// forward any (buzzer_name, timer_name) pairs that became due to
+/// `buzzer_tx`.
+pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<(String, String)>) {
     let mut ticker = interval(Duration::from_millis(500));
     loop {
         ticker.tick().await;
         let fired = tick(Arc::clone(&state)).await;
-        for name in fired {
-            if buzzer_tx.send(name).await.is_err() {
+        for (buzzer, timer) in fired {
+            if buzzer_tx.send((buzzer, timer)).await.is_err() {
                 return; // receiver gone; nothing left to do
             }
         }
@@ -25,11 +26,11 @@ pub async fn run_scheduler(state: Arc<AppState>, buzzer_tx: Sender<String>) {
 
 /// Advance the state by one scheduler pass.
 ///
-/// Returns the names of the buzzers whose fire_time has passed in this pass
-/// (deduplicated by name, in index order). Extracted from the loop so unit
-/// tests can drive the scheduler deterministically.
-pub async fn tick(state: Arc<AppState>) -> Vec<String> {
-    let mut fired_this_tick: Vec<String> = Vec::new();
+/// Returns the (buzzer_name, timer_name) pairs whose fire_time has passed
+/// in this pass (in index order). Extracted from the loop so unit tests can
+/// drive the scheduler deterministically.
+pub async fn tick(state: Arc<AppState>) -> Vec<(String, String)> {
+    let mut fired_this_tick: Vec<(String, String)> = Vec::new();
     let mut state_changed = false;
 
     let mut inner = state.lock().await;
@@ -70,7 +71,7 @@ pub async fn tick(state: Arc<AppState>) -> Vec<String> {
             let fire_time = run.started_at + run.elapsed_before_pause + buzzer_ref.offset;
             if now >= fire_time {
                 run.fired_indices.push(idx);
-                fired_now.push(buzzer_ref.buzzer_name.clone());
+                fired_now.push((buzzer_ref.buzzer_name.clone(), timer_name.clone()));
             }
         }
 
@@ -138,6 +139,7 @@ mod tests {
                 runs,
                 registered: true,
                 last_saved_at: None,
+                interrupt_pending: None,
             },
         ))
     }
@@ -156,7 +158,13 @@ mod tests {
         }
     }
 
-    fn run(name: &str, status: TimerStatus, started_secs_ago: i64, rep: u32, fired: &[usize]) -> TimerRun {
+    fn run(
+        name: &str,
+        status: TimerStatus,
+        started_secs_ago: i64,
+        rep: u32,
+        fired: &[usize],
+    ) -> TimerRun {
         TimerRun {
             timer_name: name.to_string(),
             started_at: Local::now() - Duration::seconds(started_secs_ago),
@@ -167,6 +175,8 @@ mod tests {
             paused_at: None,
             elapsed_before_pause: Duration::zero(),
             fired_indices: fired.to_vec(),
+            user_interrupt: false,
+            interrupt_focus: None,
         }
     }
 
@@ -178,7 +188,7 @@ mod tests {
             vec![run("t", TimerStatus::Running, 10, 0, &[])],
         );
         let fired = tick(Arc::clone(&s)).await;
-        assert_eq!(fired, vec!["buzz"]);
+        assert_eq!(fired, vec![("buzz".to_string(), "t".to_string())]);
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.fired_indices, vec![0]);
         assert_eq!(run.status, TimerStatus::Running);
@@ -191,7 +201,7 @@ mod tests {
             vec![run("t", TimerStatus::Running, 10, 0, &[])],
         );
         let fired = tick(Arc::clone(&s)).await;
-        assert_eq!(fired, vec!["buzz"]);
+        assert_eq!(fired, vec![("buzz".to_string(), "t".to_string())]);
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.status, TimerStatus::Completed);
     }
@@ -276,7 +286,7 @@ mod tests {
             vec![run("t", TimerStatus::Running, 10, 0, &[])],
         );
         let fired = tick(Arc::clone(&s)).await;
-        assert_eq!(fired, vec!["buzz", "buzz"]);
+        assert_eq!(fired, vec![("buzz".to_string(), "t".to_string()); 2]);
         let run = s.get_run("t").await.unwrap();
         assert_eq!(run.fired_indices, vec![0, 1]);
     }

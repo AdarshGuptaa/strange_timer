@@ -35,7 +35,11 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
   service (systemd / launchd / Task Scheduler) and resumes persisted runs
   after reboot.
 - **Shell completions** — `strangetimer install-completions` wires <Tab>
-  completion into your shell (bash / zsh / fish / powershell).
+  completion into your shell, with live suggestions for your timer and
+  buzzer names as you type.
+- **User-interrupt mode** — `run -u` pauses the timer at every buzzer and
+  loops audio until you press Enter; the CLI stays attached and prompts
+  you.
 
 ## Installation
 
@@ -94,7 +98,10 @@ strangetimer create timer workAndFun 45min 15min
 
 # Run it three times, and watch the live view (press any key to exit)
 strangetimer run workAndFun -n 3
-strangetimer view timers
+strangetimer view timers          # full-screen table; resize-friendly
+
+# Or run with user-interrupt: pauses at each buzzer until you press Enter
+strangetimer run workAndFun -u
 ```
 
 The first command that talks to the daemon starts it in the background
@@ -265,7 +272,7 @@ Any other command auto-starts the daemon if it isn't running
 | `strangetimer create timer <name> <offset> [<buzzer> ...]` | Create a timer. Offsets support `30s`, `5m`/`5min`, `2h`, `1D`, `1W` and compounds like `1h30m`. A bare offset uses the built-in `default_audio` buzzer. |
 | `strangetimer duplicate timer <source> [<new_name>]` | Clone a timer; defaults to `<source>_copy`. |
 | `strangetimer delete timer <name>` | Delete a definition (refused while a run is active). |
-| `strangetimer run <name> [-n count \| -i] [-t HH:MM]` | Start a run, optionally repeated or scheduled. |
+| `strangetimer run <name> [-n count \| -i] [-t HH:MM] [-u]` | Start a run, optionally repeated or scheduled. `-u` pauses at every buzzer until you press Enter. |
 | `strangetimer pause <name>` / `pauseall` | Pause the countdown. |
 | `strangetimer resume <name>` | Resume a paused countdown. |
 | `strangetimer stop <name>` / `stopall` | Cancel a run (keeps the definition). |
@@ -287,10 +294,10 @@ are seeded on first run and cannot be deleted.
 
 | Command | Description |
 |---|---|
-| `strangetimer view timers` | Live-animated overview of every active run (full-screen; re-lays out on resize). |
+| `strangetimer view timers` | Live table of active runs plus an inactive section for defined-but-not-running timers (full-screen, color-coded, re-lays out on resize). |
 | `strangetimer view <timer_name>` | Single-timer progress block + buzzer countdown table. |
 | `strangetimer completions <bash\|zsh\|fish\|powershell>` | Print a shell completion script. |
-| `strangetimer install-completions [--shell <shell>]` | Install completions into your shell (detects `$SHELL`). |
+| `strangetimer install-completions [--shell <shell>]` | Install completions into your shell (detects `$SHELL`); <Tab> then suggests subcommands, flags, and your timer/buzzer names. |
 
 When stdout is not a terminal, views render as a static snapshot instead of
 animating.

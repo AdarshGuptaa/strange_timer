@@ -1,14 +1,20 @@
 mod cli;
 mod commands;
+mod style;
 
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
 use cli::{Cli, Command, CreateKind, DeleteKind, DuplicateKind};
 
 fn main() {
+    // State-aware completion engine: answers COMPLETE=<shell> <bin> …
+    // invocations (tab completion) and exits; a no-op for normal runs.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
-        eprintln!("error: {e:#}");
+        eprintln!("{}", style::err(&format!("error: {e:#}")));
         std::process::exit(1);
     }
 }

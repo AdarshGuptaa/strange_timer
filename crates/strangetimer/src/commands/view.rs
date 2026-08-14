@@ -13,6 +13,7 @@ use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::model::{BuzzerRef, RepeatMode, Timer, TimerRun, TimerStatus};
 
 use crate::commands::send_and_receive;
+use crate::style;
 
 /// Characters the animated cursor cycles through (roughly one per 100ms
 /// frame, so the full cycle takes ~0.3s).
@@ -23,6 +24,8 @@ const CURSOR_STATIC: char = '▄';
 
 /// Below this width the block layout degrades to a one-line summary.
 const MIN_BLOCK_WIDTH: usize = 30;
+/// Below this width the overview table degrades to a one-line list.
+const MIN_TABLE_WIDTH: usize = 40;
 /// The progress bar is capped so a wide terminal doesn't stretch it absurdly.
 const MAX_BAR_WIDTH: usize = 40;
 /// The bar is hidden entirely below this many available columns.
@@ -75,7 +78,7 @@ pub fn view_timer(name: &str) -> Result<()> {
     })?;
 
     let (timer, runs) = match response {
-        ServerMessage::TimerDetail { timer, runs } => (timer, runs),
+        ServerMessage::TimerDetail { timer, runs, .. } => (timer, runs),
         ServerMessage::Error(e) => return Err(anyhow!(e)),
         other => return Err(anyhow!("unexpected daemon response: {other:?}")),
     };
@@ -126,7 +129,7 @@ pub fn view_timer(name: &str) -> Result<()> {
 /// computed locally from this snapshot (never re-fetched per frame).
 fn fetch_snapshot() -> Result<(Vec<Timer>, Vec<TimerRun>)> {
     match send_and_receive(&ClientMessage::GetTimers)? {
-        ServerMessage::TimerList { timers, runs } => Ok((timers, runs)),
+        ServerMessage::TimerList { timers, runs, .. } => Ok((timers, runs)),
         ServerMessage::Error(e) => Err(anyhow!(e)),
         other => Err(anyhow!("unexpected daemon response: {other:?}")),
     }
@@ -140,9 +143,11 @@ fn active_runs(runs: &[TimerRun]) -> Vec<TimerRun> {
         .collect()
 }
 
-/// Render the full `view timers` output for a set of runs (with blank lines
-/// between blocks), capped at `height` lines. Pure — called by both static
-/// and animated paths.
+/// Render the full `view timers` output: a bordered table with an ACTIVE
+/// section (live runs, sorted by next buzzer) and an INACTIVE section
+/// (defined timers without a live run), capped at `height` lines. Falls
+/// back to a minimal one-line-per-timer list below the table width
+/// threshold. Pure — called by both static and animated paths.
 fn render_overview(
     timers: &[Timer],
     runs: &[TimerRun],
@@ -151,6 +156,214 @@ fn render_overview(
     height: usize,
     cursor: char,
 ) -> String {
+    if width < MIN_TABLE_WIDTH {
+        return render_minimal_list(timers, runs, now, width, height);
+    }
+
+    // Column widths from the available width (muted, readable).
+    let widths = RowWidths::for_width(width);
+    let show_bar = widths.bar >= 10;
+
+    // Rows, tagged with whether they belong to the active section so a
+    // divider can be drawn between the sections.
+    let mut rows: Vec<(bool, [String; 5])> = Vec::new();
+
+    let mut active: Vec<&TimerRun> = runs.iter().collect();
+    active.sort_by_key(|r| next_buzzer_fire(timers, r, now).unwrap_or_else(chrono::Local::now));
+    for run in active {
+        let Some(timer) = timers.iter().find(|t| t.name == run.timer_name) else {
+            continue;
+        };
+        rows.push((true, active_row(timer, run, now, &widths, cursor)));
+    }
+    for timer in timers
+        .iter()
+        .filter(|t| !runs.iter().any(|r| r.timer_name == t.name))
+    {
+        rows.push((false, inactive_row(timer, &widths)));
+    }
+
+    let header_line = format!(
+        "│ {:<w$} │ {:<s$} │ {:<t$} │ {:<n$} │ {}",
+        style::header("TIMER"),
+        style::header("STATUS"),
+        style::header("START → END"),
+        style::header("NEXT"),
+        style::header("PROGRESS"),
+        w = widths.name,
+        s = widths.status,
+        t = widths.time,
+        n = widths.next,
+    );
+    let rule = style::rule(&"─".repeat(width.saturating_sub(4)));
+
+    let mut out = String::new();
+    out.push_str(&style::header("ACTIVE RUNS"));
+    out.push('\n');
+    out.push_str(&header_line);
+    out.push('\n');
+    out.push_str(&rule);
+    out.push('\n');
+
+    // Height budget: section header, header row, rule, then one line per
+    // row plus a divider between the two sections.
+    let mut used = 4usize;
+    let mut overflow = 0usize;
+    let mut prev_active = true;
+    let mut rows = rows.into_iter().peekable();
+    while let Some((is_active, row)) = rows.next() {
+        let divider = prev_active && !is_active;
+        let extra = used + 1 + if divider { 1 } else { 0 };
+        if extra > height {
+            overflow += 1 + rows.len();
+            break;
+        }
+        if divider {
+            out.push_str(&rule);
+            out.push('\n');
+            used += 1;
+        }
+        let cols = if show_bar {
+            row
+        } else {
+            [
+                row[0].clone(),
+                row[1].clone(),
+                row[2].clone(),
+                row[3].clone(),
+                String::new(),
+            ]
+        };
+        out.push_str(&format!(
+            "│ {:<w$} │ {:<s$} │ {:<t$} │ {:<n$} │ {}",
+            cols[0],
+            cols[1],
+            cols[2],
+            cols[3],
+            cols[4],
+            w = widths.name,
+            s = widths.status,
+            t = widths.time,
+            n = widths.next,
+        ));
+        out.push('\n');
+        used += 1;
+        prev_active = is_active;
+    }
+
+    if overflow > 0 {
+        out.push_str(&style::dim(&format!("+{overflow} more timer(s) not shown")));
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Column widths for the overview table, derived from the terminal width.
+struct RowWidths {
+    name: usize,
+    status: usize,
+    time: usize,
+    next: usize,
+    bar: usize,
+}
+
+impl RowWidths {
+    fn for_width(width: usize) -> Self {
+        let name = (width * 22 / 100).clamp(8, 20);
+        let status = 9; // "scheduled" / "run ×∞"
+        let time = (width * 28 / 100).clamp(12, 22);
+        let next = (width * 18 / 100).clamp(8, 18);
+        let bar = width.saturating_sub(name + status + time + next + 4); // 4 "│" separators
+        RowWidths {
+            name,
+            status,
+            time,
+            next,
+            bar,
+        }
+    }
+}
+
+/// One row for a live run: name, colored status, start → end window (with
+/// repetition marker), next buzzer, and the animated progress bar.
+fn active_row(
+    timer: &Timer,
+    run: &TimerRun,
+    now: DateTime<Local>,
+    w: &RowWidths,
+    cursor: char,
+) -> [String; 5] {
+    let total = total_duration(timer);
+    let elapsed = effective_elapsed(run, now, total);
+
+    let rep = match run.repetitions {
+        RepeatMode::Count(n) if n > 1 => format!(" ×{n}"),
+        RepeatMode::Infinite => " ∞".to_string(),
+        _ => String::new(),
+    };
+    let status_text = match run.status {
+        TimerStatus::Running => format!("run{rep}"),
+        TimerStatus::Paused => "paused".to_string(),
+        TimerStatus::Scheduled => "scheduled".to_string(),
+        TimerStatus::Completed => "done".to_string(),
+    };
+
+    let start = run.started_at.format("%H:%M");
+    let end = (run.started_at + total).format("%H:%M");
+    let time = format!("{start} → {end}");
+
+    let next = next_buzzer(timer, run, now)
+        .map(|(n, _)| n)
+        .unwrap_or_else(|| "—".to_string());
+
+    let bar = render_bar(total, elapsed, &timer.buzzers, w.bar, cursor);
+    [
+        style::name(&truncate(&timer.name, w.name)),
+        style::status(&truncate(&status_text, w.status), run.status.clone()),
+        truncate(&time, w.time),
+        truncate(&next, w.next),
+        format!("X-{bar}-X"),
+    ]
+}
+
+/// One row for a defined-but-not-running timer.
+fn inactive_row(timer: &Timer, w: &RowWidths) -> [String; 5] {
+    let total = total_duration(timer);
+    let time = format!("total {}", fmt_remaining(total));
+    let next = match timer.buzzers.len() {
+        0 => "no buzzers".to_string(),
+        1 => "1 buzzer".to_string(),
+        n => format!("{n} buzzers"),
+    };
+    [
+        style::dim(&truncate(&timer.name, w.name)),
+        style::dim("—"),
+        truncate(&time, w.time),
+        truncate(&next, w.next),
+        "—".to_string(),
+    ]
+}
+
+/// The fire time of a run's next buzzer (for sorting), or `now`.
+fn next_buzzer_fire(
+    timers: &[Timer],
+    run: &TimerRun,
+    now: DateTime<Local>,
+) -> Option<DateTime<Local>> {
+    let timer = timers.iter().find(|t| t.name == run.timer_name)?;
+    next_buzzer(timer, run, now).map(|(_, t)| t)
+}
+
+/// Minimal one-line-per-timer list for terminals narrower than the table
+/// threshold. Pure; capped at `height`.
+fn render_minimal_list(
+    timers: &[Timer],
+    runs: &[TimerRun],
+    now: DateTime<Local>,
+    width: usize,
+    height: usize,
+) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut overflow = 0usize;
 
@@ -158,26 +371,33 @@ fn render_overview(
         let Some(timer) = timers.iter().find(|t| t.name == run.timer_name) else {
             continue;
         };
-        let block = render_block(timer, run, now, width, cursor);
-        let block_lines: Vec<String> = block.lines().map(str::to_string).collect();
-        let spacer = if lines.is_empty() { 0 } else { 1 };
-
-        if lines.len() + spacer + block_lines.len() > height {
+        if lines.len() >= height {
             overflow += 1;
             continue;
         }
-        if spacer > 0 {
-            lines.push(String::new());
+        lines.push(render_minimal(timer, run, now, width, CURSOR_STATIC));
+    }
+    for timer in timers
+        .iter()
+        .filter(|t| !runs.iter().any(|r| r.timer_name == t.name))
+    {
+        if lines.len() >= height {
+            overflow += 1;
+            continue;
         }
-        lines.extend(block_lines);
+        let total = total_duration(timer);
+        let line = format!(
+            "{} {} — {}",
+            style::dim(&timer.name),
+            style::dim(&format!("total {}", fmt_remaining(total))),
+            style::dim("inactive")
+        );
+        lines.push(truncate(&line, width));
     }
 
     if overflow > 0 {
-        lines.push(format!(
-            "+{overflow} more timer(s) not shown (resize the terminal)"
-        ));
+        lines.push(format!("+{overflow} more timer(s) not shown"));
     }
-
     lines.join("\n")
 }
 
@@ -535,6 +755,8 @@ mod tests {
             paused_at: None,
             elapsed_before_pause: Duration::zero(),
             fired_indices: vec![],
+            user_interrupt: false,
+            interrupt_focus: None,
         }
     }
 

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use chrono::{Duration, Local};
 use strangetimer_core::model::{Buzzer, DaemonState, RepeatMode, Timer, TimerRun, TimerStatus};
 use strangetimer_core::persistence::{save_buzzers, save_state, save_timers};
@@ -9,6 +9,9 @@ use tokio::sync::Mutex;
 /// persists the affected collection to disk before returning.
 pub struct AppState {
     inner: Mutex<StateInner>,
+    /// Synchronous mirror of `DaemonState::interrupt_pending`, readable from
+    /// background threads (the looping audio playback) without async.
+    pending: std::sync::Mutex<Option<String>>,
 }
 
 pub struct StateInner {
@@ -29,6 +32,7 @@ impl AppState {
                 state,
                 close_windows_confirmed: false,
             }),
+            pending: std::sync::Mutex::new(None),
         }
     }
 
@@ -126,7 +130,10 @@ impl AppState {
             .find(|b| b.name == name)
             .ok_or_else(|| anyhow!("no buzzer named {name:?}"))?;
         if buzzer.builtin {
-            return Err(anyhow!("{:?} is a built-in buzzer and cannot be deleted", name));
+            return Err(anyhow!(
+                "{:?} is a built-in buzzer and cannot be deleted",
+                name
+            ));
         }
         if inner
             .timers
@@ -163,6 +170,8 @@ impl AppState {
         timer_name: &str,
         repetitions: RepeatMode,
         schedule_time: Option<chrono::DateTime<Local>>,
+        user_interrupt: bool,
+        interrupt_focus: Option<String>,
     ) -> Result<TimerRun> {
         let mut inner = self.inner.lock().await;
         let timer = inner
@@ -187,6 +196,8 @@ impl AppState {
             paused_at: None,
             elapsed_before_pause: Duration::zero(),
             fired_indices: Vec::new(),
+            user_interrupt,
+            interrupt_focus,
         };
 
         // A timer has at most one live run: replace any previous one.
@@ -199,6 +210,10 @@ impl AppState {
     pub async fn remove_run(&self, timer_name: &str) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.state.runs.retain(|r| r.timer_name != timer_name);
+        if inner.state.interrupt_pending.as_deref() == Some(timer_name) {
+            inner.state.interrupt_pending = None;
+            *self.pending.lock().expect("pending lock") = None;
+        }
         save_state(&inner.state)?;
         Ok(())
     }
@@ -286,6 +301,13 @@ impl AppState {
         run.status = TimerStatus::Running;
         run.paused_at = None;
 
+        // Resume doubles as the user-interrupt acknowledgement: clear the
+        // pending marker so any looping audio stops.
+        if inner.state.interrupt_pending.as_deref() == Some(timer_name) {
+            inner.state.interrupt_pending = None;
+            *self.pending.lock().expect("pending lock") = None;
+        }
+
         save_state(&inner.state)?;
         Ok(())
     }
@@ -294,6 +316,8 @@ impl AppState {
         let mut inner = self.inner.lock().await;
         if !inner.state.runs.is_empty() {
             inner.state.runs.clear();
+            inner.state.interrupt_pending = None;
+            *self.pending.lock().expect("pending lock") = None;
             save_state(&inner.state)?;
         }
         Ok(())
@@ -325,6 +349,39 @@ impl AppState {
     pub async fn set_close_windows_confirmed(&self) {
         let mut inner = self.inner.lock().await;
         inner.close_windows_confirmed = true;
+    }
+
+    // --- User-interrupt (`run -u`) ---
+
+    /// The timer currently awaiting a user-interrupt acknowledgement.
+    pub async fn interrupt_pending(&self) -> Option<String> {
+        let inner = self.inner.lock().await;
+        inner.state.interrupt_pending.clone()
+    }
+
+    /// Pause the run and mark it as awaiting acknowledgement. Called before
+    /// the buzzer actions dispatch, so a `resume` arriving mid-dispatch
+    /// clears the marker and stops any looping audio.
+    pub async fn begin_interrupt(&self, timer_name: &str) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        let run = inner
+            .state
+            .runs
+            .iter_mut()
+            .find(|r| r.timer_name == timer_name)
+            .ok_or_else(|| anyhow!("no active run found for timer: {timer_name}"))?;
+
+        run.status = TimerStatus::Paused;
+        run.paused_at = Some(Local::now());
+        inner.state.interrupt_pending = Some(timer_name.to_string());
+        *self.pending.lock().expect("pending lock") = Some(timer_name.to_string());
+        save_state(&inner.state)?;
+        Ok(())
+    }
+
+    /// Synchronous pending query for background threads (looping audio).
+    pub fn interrupt_pending_sync(&self) -> Option<String> {
+        self.pending.lock().expect("pending lock").clone()
     }
 }
 
@@ -374,7 +431,9 @@ mod tests {
     async fn remove_timer_refused_while_run_active() {
         let s = fresh_state();
         s.add_timer(timer("t")).await.unwrap();
-        s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
         assert!(s.remove_timer("t").await.is_err());
         s.remove_run("t").await.unwrap();
         s.remove_timer("t").await.unwrap();
@@ -389,7 +448,10 @@ mod tests {
         assert_eq!(n1, "t_copy");
         let n2 = s.duplicate_timer("t", None).await.unwrap();
         assert_eq!(n2, "t_copy_2");
-        let n3 = s.duplicate_timer("t", Some("custom".to_string())).await.unwrap();
+        let n3 = s
+            .duplicate_timer("t", Some("custom".to_string()))
+            .await
+            .unwrap();
         assert_eq!(n3, "custom");
         assert!(s.duplicate_timer("missing", None).await.is_err());
     }
@@ -427,29 +489,39 @@ mod tests {
         let s = fresh_state();
         s.add_timer(timer("t")).await.unwrap();
 
-        let run = s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+        let run = s
+            .start_run("t", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
         assert_eq!(run.status, TimerStatus::Running);
         assert_eq!(run.current_rep, 0);
         assert!(run.fired_indices.is_empty());
 
         let future = Local::now() + Duration::hours(1);
         let run = s
-            .start_run("t", RepeatMode::Infinite, Some(future))
+            .start_run("t", RepeatMode::Infinite, Some(future), false, None)
             .await
             .unwrap();
         assert_eq!(run.status, TimerStatus::Scheduled);
         assert_eq!(run.schedule_time, Some(future));
         assert_eq!(s.lock().await.state.runs.len(), 1);
 
-        assert!(s.start_run("missing", RepeatMode::Count(1), None).await.is_err());
+        assert!(s
+            .start_run("missing", RepeatMode::Count(1), None, false, None)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn start_run_replaces_existing_run() {
         let s = fresh_state();
         s.add_timer(timer("t")).await.unwrap();
-        s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
-        s.start_run("t", RepeatMode::Count(5), None).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
+        s.start_run("t", RepeatMode::Count(5), None, false, None)
+            .await
+            .unwrap();
         let runs = s.lock().await.state.runs.clone();
         assert_eq!(runs.len(), 1);
         assert!(matches!(runs[0].repetitions, RepeatMode::Count(5)));
@@ -459,7 +531,9 @@ mod tests {
     async fn pause_resume_accounts_elapsed() {
         let s = fresh_state();
         s.add_timer(timer("t")).await.unwrap();
-        s.start_run("t", RepeatMode::Count(1), None).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
 
         s.pause_run("t").await.unwrap();
         let paused = s.get_run("t").await.unwrap();
@@ -486,8 +560,12 @@ mod tests {
         let s = fresh_state();
         s.add_timer(timer("a")).await.unwrap();
         s.add_timer(timer("b")).await.unwrap();
-        s.start_run("a", RepeatMode::Count(1), None).await.unwrap();
-        s.start_run("b", RepeatMode::Count(1), None).await.unwrap();
+        s.start_run("a", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
+        s.start_run("b", RepeatMode::Count(1), None, false, None)
+            .await
+            .unwrap();
 
         s.pause_all().await.unwrap();
         for run in s.lock().await.state.runs.clone() {
@@ -504,5 +582,48 @@ mod tests {
         assert!(!s.is_close_windows_confirmed().await);
         s.set_close_windows_confirmed().await;
         assert!(s.is_close_windows_confirmed().await);
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_begin_pauses_and_resume_clears() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None, true, Some("term".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(s.interrupt_pending().await, None);
+        s.begin_interrupt("t").await.unwrap();
+
+        let run = s.get_run("t").await.unwrap();
+        assert_eq!(run.status, TimerStatus::Paused);
+        assert_eq!(s.interrupt_pending().await.as_deref(), Some("t"));
+        assert_eq!(s.interrupt_pending_sync().as_deref(), Some("t"));
+
+        // Resume doubles as the acknowledgement.
+        s.resume_run("t").await.unwrap();
+        assert_eq!(s.interrupt_pending().await, None);
+        assert_eq!(s.interrupt_pending_sync(), None);
+        assert_eq!(s.get_run("t").await.unwrap().status, TimerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn stop_and_remove_run_clear_pending() {
+        let s = fresh_state();
+        s.add_timer(timer("t")).await.unwrap();
+        s.start_run("t", RepeatMode::Count(1), None, true, None)
+            .await
+            .unwrap();
+        s.begin_interrupt("t").await.unwrap();
+
+        s.remove_run("t").await.unwrap();
+        assert_eq!(s.interrupt_pending().await, None);
+
+        s.start_run("t", RepeatMode::Count(1), None, true, None)
+            .await
+            .unwrap();
+        s.begin_interrupt("t").await.unwrap();
+        s.stop_all().await.unwrap();
+        assert_eq!(s.interrupt_pending().await, None);
     }
 }

@@ -67,6 +67,15 @@ pub struct TimerRun {
     pub paused_at: Option<DateTime<Local>>,
     pub elapsed_before_pause: Duration,
     pub fired_indices: Vec<usize>,
+    /// `run -u/--userinterrupt`: the run pauses at every buzzer and waits
+    /// for the user to acknowledge (Enter on the attached CLI, or
+    /// `strangetimer resume <name>`).
+    #[serde(default)]
+    pub user_interrupt: bool,
+    /// Terminal window captured at `run -u` time; the daemon focuses it
+    /// after non-audio buzzer actions so the user sees the prompt.
+    #[serde(default)]
+    pub interrupt_focus: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,4 +101,9 @@ pub struct DaemonState {
     /// recovery (Prompt 20) to reason about downtime; updated automatically
     /// inside `persistence::save_state`.
     pub last_saved_at: Option<DateTime<Local>>,
+    /// Timer currently awaiting a user-interrupt acknowledgement
+    /// (`run -u`). Persisted so a restart keeps the run paused and the
+    /// attached CLI (or `resume`) can still acknowledge it.
+    #[serde(default)]
+    pub interrupt_pending: Option<String>,
 }

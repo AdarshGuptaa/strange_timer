@@ -22,6 +22,7 @@ use strangetimer_core::persistence::data_dir;
 
 use crate::cli::DaemonCommand;
 use crate::commands::{send_and_receive, try_connect};
+use crate::style;
 
 /// How long to wait for the daemon to appear / disappear after a lifecycle
 /// action, and between polls.
@@ -61,17 +62,22 @@ pub fn run(cmd: &DaemonCommand) -> Result<()> {
 fn status() -> Result<()> {
     match probe() {
         Probe::Running { pid, version } => {
-            println!("strangetimer-daemon is running (pid {pid}, version {version}).");
+            println!(
+                "{} (pid {}, version {}).",
+                style::name("strangetimer-daemon is running"),
+                style::accent(&pid.to_string()),
+                style::dim(&version)
+            );
         }
         Probe::Incompatible => {
             println!(
-                "something is listening on {} but it is not a compatible \
-                 strangetimer-daemon (is an older version running?)",
+                "{} on {} — not a compatible strangetimer-daemon (is an older version running?)",
+                style::warn("something is listening"),
                 socket_name()
             );
         }
         Probe::NotRunning => {
-            println!("strangetimer-daemon is not running.");
+            println!("{}", style::dim("strangetimer-daemon is not running."));
         }
     }
     Ok(())
@@ -108,7 +114,12 @@ fn start_daemon(verbose: bool) -> Result<Probe> {
     match probe() {
         Probe::Running { pid, version } => {
             if verbose {
-                println!("strangetimer-daemon is already running (pid {pid}, version {version}).");
+                println!(
+                    "{} (pid {}, version {}).",
+                    style::name("strangetimer-daemon is already running"),
+                    style::accent(&pid.to_string()),
+                    style::dim(&version)
+                );
             }
             return Ok(Probe::Running { pid, version });
         }
@@ -171,7 +182,8 @@ fn spawn_detached(daemon: &Path) -> Result<Probe> {
         .spawn()
         .with_context(|| format!("failed to spawn {}", daemon.display()))?;
     println!(
-        "Started strangetimer-daemon (pid {}). Log: {}",
+        "{} (pid {}). Log: {}",
+        style::name("Started strangetimer-daemon"),
         child.id(),
         log_path.display()
     );
@@ -222,7 +234,7 @@ fn wait_for_gone() -> Result<()> {
 fn stop() -> Result<()> {
     match probe() {
         Probe::NotRunning => {
-            println!("strangetimer-daemon is not running.");
+            println!("{}", style::dim("strangetimer-daemon is not running."));
             return Ok(());
         }
         Probe::Incompatible => {
@@ -262,7 +274,7 @@ fn stop() -> Result<()> {
 
     match wait_for_gone() {
         Ok(()) => {
-            println!("Stopped strangetimer-daemon.");
+            println!("{}", style::name("Stopped strangetimer-daemon."));
             Ok(())
         }
         Err(e) => {
