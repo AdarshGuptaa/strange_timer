@@ -3,6 +3,7 @@ pub mod completions;
 pub mod control;
 pub mod daemon;
 pub mod examples;
+pub mod install_completions;
 pub mod timers;
 pub mod view;
 
@@ -12,16 +13,57 @@ use strangetimer_core::ipc::{socket_name, ClientMessage, ServerMessage};
 /// Open a connection to the daemon's IPC endpoint and exchange a single
 /// message pair (request → response). The connection is short-lived: the
 /// daemon accepts, handles, and closes each one.
+///
+/// When nothing is listening, most commands transparently start the daemon
+/// and retry once (see [`auto_start`]). `daemon status` / `daemon stop`
+/// never auto-start — they must be able to report "not running".
 pub fn send_and_receive(msg: &ClientMessage) -> Result<ServerMessage> {
-    let mut conn = connect()?;
+    match try_connect() {
+        Ok(conn) => exchange_on(conn, msg),
+        Err(first_err) => {
+            if auto_start_enabled() && !is_lifecycle_command(msg) {
+                eprintln!("StrangeTimer daemon not running — starting it…");
+                daemon::ensure_started(false)?;
+                let conn = try_connect().with_context(|| {
+                    format!(
+                        "failed to connect to the StrangeTimer daemon at {} \
+                         after starting it",
+                        socket_name()
+                    )
+                })?;
+                exchange_on(conn, msg)
+            } else {
+                Err(first_err).with_context(daemon_hint)
+            }
+        }
+    }
+}
+
+/// `Ping` (daemon status) and `Shutdown` (daemon stop) must never trigger
+/// an auto-start — they report on the daemon's absence instead.
+fn is_lifecycle_command(msg: &ClientMessage) -> bool {
+    matches!(msg, ClientMessage::Ping | ClientMessage::Shutdown)
+}
+
+/// Auto-start is on unless the user opts out with `STRANGETIMER_AUTO_START=0`.
+fn auto_start_enabled() -> bool {
+    !matches!(std::env::var("STRANGETIMER_AUTO_START").as_deref(), Ok("0"))
+}
+
+fn exchange_on(
+    mut conn: interprocess::local_socket::Stream,
+    msg: &ClientMessage,
+) -> Result<ServerMessage> {
     strangetimer_core::ipc::write_message(&mut conn, msg).context("failed to write IPC message")?;
     let response = strangetimer_core::ipc::read_message::<ServerMessage>(&mut conn)
         .context("failed to read IPC response")?;
     Ok(response)
 }
 
-/// Connect to the daemon over the platform-appropriate IPC primitive.
-pub fn connect() -> Result<interprocess::local_socket::Stream> {
+/// Raw connect attempt without the "is the daemon running?" hint context —
+/// used by the lifecycle probe to distinguish "not listening" from
+/// "listening".
+pub fn try_connect() -> Result<interprocess::local_socket::Stream> {
     #[cfg(unix)]
     {
         use interprocess::local_socket::traits::Stream as _;
@@ -29,7 +71,7 @@ pub fn connect() -> Result<interprocess::local_socket::Stream> {
         let name = socket_name()
             .to_fs_name::<GenericFilePath>()
             .with_context(|| format!("invalid socket name: {}", socket_name()))?;
-        Stream::connect(name).with_context(daemon_hint)
+        Stream::connect(name).map_err(Into::into)
     }
     #[cfg(windows)]
     {
@@ -38,7 +80,7 @@ pub fn connect() -> Result<interprocess::local_socket::Stream> {
         let name = socket_name()
             .to_ns_name::<GenericNamespaced>()
             .with_context(|| format!("invalid pipe name: {}", socket_name()))?;
-        Stream::connect(name).with_context(daemon_hint)
+        Stream::connect(name).map_err(Into::into)
     }
 }
 

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+#[macro_use]
+mod log;
 mod buzzers;
 mod platform;
 mod scheduler;
@@ -20,6 +22,8 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    log::init();
+
     // 1. Load timers, buzzers, and state from persistence (or initialise
     //    fresh). The persistence layer writes default files on first call.
     let timers = load_timers().context("failed to load timers")?;
@@ -30,11 +34,11 @@ async fn main() -> Result<()> {
     if buzzers.is_empty() {
         buzzers = builtin_buzzers();
         save_buzzers(&buzzers).context("failed to persist seeded buzzers")?;
-        eprintln!("strangetimer-daemon: seeded built-in buzzer library");
+        info!("seeded built-in buzzer library");
     }
 
-    eprintln!(
-        "strangetimer-daemon: loaded {} timers, {} buzzers, {} active runs",
+    info!(
+        "loaded {} timers, {} buzzers, {} active runs",
         timers.len(),
         buzzers.len(),
         state.runs.len(),
@@ -50,10 +54,10 @@ async fn main() -> Result<()> {
                     .update_state(|s| s.registered = true)
                     .await
                     .context("failed to persist autostart flag")?;
-                eprintln!("strangetimer-daemon: registered for autostart.");
+                info!("registered for autostart.");
             }
             Err(e) => {
-                eprintln!("strangetimer-daemon: autostart registration failed: {e:#}");
+                warn!("autostart registration failed: {e:#}");
             }
         }
     }
@@ -81,7 +85,7 @@ async fn main() -> Result<()> {
 
     // 6. Bind the IPC listener and serve until a shutdown signal arrives.
     let listener = bind_listener(&socket_name()).context("failed to bind IPC listener")?;
-    eprintln!("strangetimer-daemon: listening on {}", socket_name());
+    info!("listening on {}", socket_name());
 
     // `shutdown` lets an IPC `Shutdown` request (from `strangetimer daemon
     // stop`) tear the accept loop down just like a signal would.
@@ -90,20 +94,20 @@ async fn main() -> Result<()> {
     tokio::select! {
         result = accept_loop(listener, Arc::clone(&app_state), Arc::clone(&shutdown)) => {
             if let Err(e) = result {
-                eprintln!("strangetimer-daemon: accept loop exited with error: {e:#}");
+                warn!("accept loop exited with error: {e:#}");
             }
         }
         _ = shutdown_signal() => {
-            eprintln!("strangetimer-daemon: shutdown signal received");
+            info!("shutdown signal received");
         }
     }
 
     // 7. Save state before exiting.
     let final_state = app_state.get_state().await;
     if let Err(e) = save_state(&final_state) {
-        eprintln!("strangetimer-daemon: failed to save state on shutdown: {e:#}");
+        warn!("failed to save state on shutdown: {e:#}");
     } else {
-        eprintln!("strangetimer-daemon: state saved");
+        info!("state saved");
     }
 
     Ok(())
@@ -135,12 +139,12 @@ fn builtin_buzzers() -> Vec<Buzzer> {
 async fn fire_buzzer(name: &str, state: Arc<AppState>) {
     match state.get_buzzer(name).await {
         Some(buzzer) => {
-            eprintln!("strangetimer-daemon: BUZZ: {name}");
+            info!("BUZZ: {name}");
             for action in &buzzer.actions {
                 buzzers::dispatch(&state, action).await;
             }
         }
-        None => eprintln!("strangetimer-daemon: BUZZ: {name} — no such buzzer (was it deleted?)"),
+        None => warn!("BUZZ: {name} — no such buzzer (was it deleted?)"),
     }
 }
 
@@ -193,16 +197,16 @@ async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<String>) {
 
         if state_changed {
             if let Err(e) = save_state(&inner.state) {
-                eprintln!("strangetimer-daemon: recovery failed to save state: {e:#}");
+                warn!("recovery failed to save state: {e:#}");
             }
         }
     }
 
     // Fire missed alarms immediately — dispatch happens in the fire task.
     for name in missed {
-        eprintln!("strangetimer-daemon: firing missed alarm for {name:?} from downtime");
+        info!("firing missed alarm for {name:?} from downtime");
         if let Err(e) = buzzer_tx.send(name).await {
-            eprintln!("strangetimer-daemon: recovery buzzer channel error: {e}");
+            warn!("recovery buzzer channel error: {e}");
             break;
         }
     }
@@ -229,10 +233,7 @@ fn bind_listener(name: &str) -> Result<interprocess::local_socket::tokio::Listen
             if !alive {
                 std::fs::remove_file(path)
                     .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
-                eprintln!(
-                    "strangetimer-daemon: removed stale socket {}",
-                    path.display()
-                );
+                info!("removed stale socket {}", path.display());
             }
         }
     }
@@ -270,7 +271,7 @@ async fn accept_loop(
                 let shutdown = Arc::clone(&shutdown);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(conn, state, shutdown).await {
-                        eprintln!("strangetimer-daemon: connection error: {e:#}");
+                        warn!("connection error: {e:#}");
                     }
                 });
             }
@@ -289,10 +290,7 @@ async fn handle_connection(
         .await
         .context("failed to read ClientMessage")?;
 
-    eprintln!(
-        "strangetimer-daemon: received ClientMessage::{}",
-        variant_name(&msg)
-    );
+    debug!("received ClientMessage::{}", variant_name(&msg));
 
     // Shutdown is special: it is answered before the normal handler so the
     // client gets its Ok even though the accept loop is about to stop.
@@ -300,7 +298,7 @@ async fn handle_connection(
         write_message_async(&mut conn, &ServerMessage::Ok)
             .await
             .context("failed to write ServerMessage")?;
-        eprintln!("strangetimer-daemon: graceful shutdown requested over IPC");
+        info!("graceful shutdown requested over IPC");
         shutdown.notify_one();
         return Ok(());
     }
@@ -321,7 +319,7 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
         ClientMessage::DuplicateTimer { source, new_name } => {
             match state.duplicate_timer(&source, new_name).await {
                 Ok(name) => {
-                    eprintln!("strangetimer-daemon: duplicated {source:?} as {name:?}");
+                    info!("duplicated {source:?} as {name:?}");
                     ServerMessage::Ok
                 }
                 Err(e) => ServerMessage::Error(e.to_string()),
@@ -336,10 +334,7 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             schedule_time,
         } => match state.start_run(&name, repeat, schedule_time).await {
             Ok(run) => {
-                eprintln!(
-                    "strangetimer-daemon: run started for {name:?} ({:?})",
-                    run.status
-                );
+                info!("run started for {name:?} ({:?})", run.status);
                 ServerMessage::Ok
             }
             Err(e) => ServerMessage::Error(e.to_string()),

@@ -17,7 +17,7 @@ pub fn fire_audio(path: Option<&Path>) {
         Some(p) => match std::fs::read(p) {
             Ok(bytes) => bytes,
             Err(e) => {
-                eprintln!("strangetimer-daemon: cannot read audio file {}: {e}", p.display());
+                warn!("cannot read audio file {}: {e}", p.display());
                 return;
             }
         },
@@ -26,7 +26,7 @@ pub fn fire_audio(path: Option<&Path>) {
 
     thread::spawn(move || {
         if let Err(e) = play_wav_bytes(bytes) {
-            eprintln!("strangetimer-daemon: audio playback failed: {e:#}");
+            warn!("audio playback failed: {e:#}");
         }
     });
 

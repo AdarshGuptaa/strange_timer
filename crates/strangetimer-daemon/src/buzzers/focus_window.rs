@@ -6,14 +6,14 @@ pub fn fire_focus_window(name: &str) {
     #[cfg(target_os = "linux")]
     {
         if let Err(e) = focus_linux(name) {
-            eprintln!("strangetimer-daemon: focus_window {name:?} failed: {e}");
+            warn!("focus_window {name:?} failed: {e}");
         }
     }
     #[cfg(target_os = "macos")]
     {
         let script = format!("tell application \"{name}\" to activate");
         if let Err(e) = Command::new("osascript").arg("-e").arg(&script).status() {
-            eprintln!("strangetimer-daemon: focus_window {name:?} failed: {e}");
+            warn!("focus_window {name:?} failed: {e}");
         }
     }
     #[cfg(target_os = "windows")]
@@ -24,7 +24,7 @@ pub fn fire_focus_window(name: &str) {
             .arg(&script)
             .status()
         {
-            eprintln!("strangetimer-daemon: focus_window {name:?} failed: {e}");
+            warn!("focus_window {name:?} failed: {e}");
         }
     }
 }
@@ -44,8 +44,8 @@ fn focus_linux(name: &str) -> anyhow::Result<()> {
         .args(["search", "--name", name])
         .output()?;
     if !out.status.success() {
-        eprintln!(
-            "strangetimer-daemon: no window matching {name:?} found \
+        warn!(
+            "no window matching {name:?} found \
              (wmctrl and xdotool both failed)"
         );
         return Ok(());

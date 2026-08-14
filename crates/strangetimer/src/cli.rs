@@ -61,6 +61,12 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Install shell completions so <Tab> works in your terminal.
+    InstallCompletions {
+        /// Shell to install for; defaults to the shell in `$SHELL`.
+        #[arg(long, value_enum)]
+        shell: Option<Shell>,
+    },
     /// View timers, buzzers, or a single timer's details.
     View {
         /// `timers` for all runs, `buzzers` for the buzzer library, or a
@@ -81,7 +87,7 @@ pub enum DaemonCommand {
     Restart,
 }
 
-#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Bash,
     Zsh,

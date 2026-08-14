@@ -9,10 +9,7 @@ pub fn fire_video(path: Option<&Path>) {
         None => builtin_video_path(),
     };
     if let Err(e) = open::that(&target) {
-        eprintln!(
-            "strangetimer-daemon: failed to open video {:?}: {e}",
-            target.display()
-        );
+        warn!("failed to open video {:?}: {e}", target.display());
     }
 }
 

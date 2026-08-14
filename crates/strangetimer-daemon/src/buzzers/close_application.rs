@@ -8,7 +8,7 @@ pub fn fire_close_application(name: &str) {
     #[cfg(target_os = "linux")]
     {
         if let Err(e) = close_linux(name) {
-            eprintln!("strangetimer-daemon: close_app {name:?} failed: {e}");
+            warn!("close_app {name:?} failed: {e}");
         }
     }
     #[cfg(target_os = "macos")]
@@ -25,7 +25,7 @@ pub fn fire_close_application(name: &str) {
             return;
         }
         if let Err(e) = pkill_exact(name) {
-            eprintln!("strangetimer-daemon: close_app {name:?} failed: {e}");
+            warn!("close_app {name:?} failed: {e}");
         }
     }
     #[cfg(target_os = "windows")]
@@ -53,7 +53,7 @@ fn close_linux(name: &str) -> anyhow::Result<()> {
     if full.success() {
         Ok(())
     } else {
-        eprintln!("strangetimer-daemon: no process matching {name:?} was running");
+        warn!("no process matching {name:?} was running");
         Ok(())
     }
 }

@@ -27,9 +27,8 @@ pub fn register_autostart() -> Result<()> {
             .context("cannot resolve config dir")?
             .join("systemd")
             .join("user");
-        std::fs::create_dir_all(&unit_dir).with_context(|| {
-            format!("failed to create systemd user dir {}", unit_dir.display())
-        })?;
+        std::fs::create_dir_all(&unit_dir)
+            .with_context(|| format!("failed to create systemd user dir {}", unit_dir.display()))?;
 
         let unit_path = unit_dir.join("strangetimer.service");
         let unit = format!(
@@ -49,13 +48,20 @@ pub fn register_autostart() -> Result<()> {
             .with_context(|| format!("failed to write {}", unit_path.display()))?;
 
         run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", "strangetimer"])?;
+        // Enable only — NOT `--now`. Starting is the job of the CLI's
+        // `strangetimer daemon start`, which prefers the systemd service
+        // once the unit exists. Starting here would race the CLI-spawned
+        // daemon for the IPC socket.
+        run("systemctl", &["--user", "enable", "strangetimer"])?;
         Ok(())
     }
 
     #[cfg(target_os = "macos")]
     {
-        let launch_dir = home_dir().context("cannot resolve home dir")?.join("Library").join("LaunchAgents");
+        let launch_dir = home_dir()
+            .context("cannot resolve home dir")?
+            .join("Library")
+            .join("LaunchAgents");
         std::fs::create_dir_all(&launch_dir)
             .with_context(|| format!("failed to create {}", launch_dir.display()))?;
 
@@ -83,7 +89,10 @@ pub fn register_autostart() -> Result<()> {
         std::fs::write(&plist_path, plist)
             .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
-        run("launchctl", &["load", plist_path.to_str().unwrap_or_default()])?;
+        // Write the plist only — do NOT `launchctl load` here. Loading
+        // starts the job (RunAtLoad), racing the already-running daemon for
+        // the socket. `strangetimer daemon start` starts it via
+        // `launchctl kickstart` once the plist exists.
         Ok(())
     }
 
@@ -120,7 +129,7 @@ fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run(program: &str, args: &[&str]) -> Result<()> {
     let status = Command::new(program)
         .args(args)

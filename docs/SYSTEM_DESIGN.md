@@ -66,15 +66,17 @@ crates/
       timers.rs                   create/duplicate/delete timer
       buzzers.rs                  create/delete/view buzzers
       control.rs                  run/pause/resume/stop/confirm-destructive
-      daemon.rs                   daemon start/stop/status/restart
+      daemon.rs                   daemon start/stop/status/restart + probe
       examples.rs                 `strangetimer examples [--install]`
       completions.rs              shell completion script generation
+      install_completions.rs      `install-completions` (per-user install)
       view.rs                     static + animated progress rendering
     tests/e2e.rs                  end-to-end tests (real binaries + IPC)
   strangetimer-daemon/            background service binary
     src/main.rs                   bootstrap, IPC accept loop, recovery
     src/state.rs                  AppState: in-memory model + persistence hooks
     src/scheduler.rs              500ms event loop advancing all runs
+    src/log.rs                    level-gated logger (daemon.log + stderr)
     src/buzzers/                  alarm dispatch (one module per action type)
     src/platform.rs               autostart registration, window focus
     assets/
@@ -472,14 +474,52 @@ way to replace a running daemon.
 
 The CLI (`commands/daemon.rs`) manages the process:
 
-- `status` — sends `Ping`; `Some(Status{..})` means running.
-- `start` — refuses if `status` says running; otherwise locates the daemon
-  binary (sibling of the CLI exe → `PATH` → `STRANGETIMER_DAEMON`), spawns
-  it detached (new process group on Unix, `DETACHED_PROCESS` on Windows,
-  stdout/stderr → `daemon.log` in the data dir) and polls the socket for
-  readiness.
-- `stop` — sends `Shutdown`, then polls until the socket stops accepting.
+- **Probe** — two steps: a raw socket connect decides *listening*; a `Ping`
+  round-trip decides *compatible*. `Probe` is one of
+  `Running{pid,version}` / `Incompatible` / `NotRunning`. A listener that
+  cannot answer `Ping` (older binary) is *incompatible*, never "not
+  running" — otherwise `start` would spawn a second instance that dies
+  with "Address already in use" (the original failure mode, found in
+  `daemon.log`).
+- `status` — prints the probe result.
+- `start` — on `Incompatible` it refuses with a remedy hint. Otherwise it
+  locates the daemon binary (sibling of the CLI exe → `PATH` →
+  `STRANGETIMER_DAEMON`) and prefers the OS service manager when one is
+  registered: systemd `systemctl --user start` (healing the unit's
+  `ExecStart` first — dev builds move between `target/debug` and
+  `target/release`), launchd `launchctl kickstart`, or schtasks `/Run`.
+  Only when none of those apply (or they fail) does it spawn directly:
+  detached (new process group on Unix, `DETACHED_PROCESS` on Windows,
+  stdout/stderr → `daemon.log` in the data dir). Readiness is polled via
+  the probe. The isolation env vars (`STRANGETIMER_SOCKET` /
+  `STRANGETIMER_DATA_DIR`) always force the direct path — systemd would
+  not inherit them, and tests stay hermetic.
+- `stop` — if the OS service manager owns the daemon, it stops the service
+  (systemd would otherwise restart a pkill'd process). Otherwise it sends
+  `Shutdown` and polls until the socket stops accepting; if the listener
+  is incompatible, or the daemon ignores `Shutdown`, it force-kills by
+  process name (`pkill -x strangetimer-daemon` / `taskkill`).
 - `restart` — stop followed by start.
+
+**Auto-start**: every other CLI command transparently starts the daemon on
+connect failure (`commands/mod.rs::send_and_receive`) — one stderr notice,
+then the shared start routine, then one retry. `Ping` and `Shutdown` are
+exempt so `daemon status`/`stop` can still report "not running".
+`STRANGETIMER_AUTO_START=0` opts out. This is what makes first-run UX work
+without a wrapper script: `strangetimer create timer …` just works.
+
+**Registration** (`platform.rs`) writes the service unit but no longer
+starts it (`enable` without `--now`, plist without `launchctl load`) —
+starting is the CLI's job, and having the daemon start itself from inside
+a just-spawned process raced it for the socket.
+
+### 8.5 Logging
+
+`log.rs` appends every message (debug/info/warn) to `daemon.log` in the
+data dir and mirrors to stderr only messages at or above
+`STRANGETIMER_LOG` (default `warn`). IPC chatter and `BUZZ:` lines are
+info/debug, so a foreground daemon no longer interleaves log lines with
+the user's typing; `STRANGETIMER_LOG=debug` restores full verbosity.
 
 ---
 
@@ -519,12 +559,21 @@ polls the socket until the listener accepts, and `daemon stop` sends
 ### 9.3 View rendering (`commands/view.rs`)
 
 `view timers` fetches **one** snapshot (`TimerList` with all runs) and
-renders from it. In a TTY it enters crossterm raw mode and re-renders
-every 300 ms with the cursor character cycling `▂ → ▄ → ▆`; elapsed time is
-computed locally from the snapshot (`elapsed + (now - snapshot_at)`), never
-re-fetched. Any key exits and restores the terminal (a guard restores raw
-mode even on panic). On a non-TTY stdout it prints the same layout as a
-static snapshot — useful for scripts and tests.
+renders from it. In a TTY it enters raw mode plus the **alternate screen**
+and re-renders every 100 ms with the cursor character cycling
+`▂ → ▄ → ▆`; the layout functions are pure and take `(width, height)`, so
+terminal size is re-queried every frame and a `Resize` event merely
+re-lays out instead of exiting. Any key exits and restores the shell
+(a guard restores raw mode, cursor and alternate screen even on panic).
+On a non-TTY stdout it prints the same layout as a static snapshot —
+useful for scripts and tests.
+
+The layout adapts to the width: timestamps shrink (`%Y-%m-%d %H:%M:%S` →
+`%H:%M`), the `End`/`Mult` fields drop out below thresholds, names and
+buzzer names truncate with `…`, the bar is capped at 40 cells (hidden
+below 12 columns), and below 30 columns each timer collapses to a
+one-line summary. Blocks are capped to the terminal height with a
+"+N more" line.
 
 Each block:
 
@@ -572,8 +621,9 @@ about and to test.
 ## 11. Failure Modes
 
 | Failure | Behaviour |
-|---|---|---|
-| Daemon not running | CLI prints `failed to connect ... is it running? (start it with strangetimer daemon start)` and exits 1. `daemon status` reports "not running". |
+|---|---|
+| Daemon not running | CLI commands auto-start it (one stderr notice + retry); `daemon status` reports "not running". `STRANGETIMER_AUTO_START=0` restores the plain hint error. |
+| Incompatible listener (older daemon / foreign process on the socket) | Probe reports *incompatible*; `daemon start` refuses with a remedy hint; `daemon stop` force-kills it. |
 | Daemon crashes (SIGKILL) | Stale socket removed on restart; state replayed from disk; missed alarms fire immediately. |
 | Power loss mid-write | Atomic rename leaves the previous state file intact. |
 | Two daemons | Second bind fails loudly ("Address already in use"); the probe refuses to steal a live endpoint. Replace via `strangetimer daemon stop` → `start`. |
@@ -604,8 +654,9 @@ about and to test.
   `STRANGETIMER_DATA_DIR` + `STRANGETIMER_SOCKET`. Covers seeding, CRUD,
   delete guards, alarm firing (asserting on daemon stderr), pause/resume,
   crash-recovery, persistence-file placement, the full daemon lifecycle
-  (`status` → `stop` → `start` → `stop`), `examples --install`, and the
-  new window-action buzzers.
+  (three start→stop cycles), auto-start, stop-without-auto-start, an
+  incompatible listener (a dummy Unix socket that never answers — `daemon
+  start` must refuse), `examples --install`, and the window-action buzzers.
 
 Run everything with `cargo test --workspace` (builds all binaries first)
 and lint with `cargo clippy --workspace --all-targets`.
@@ -641,3 +692,8 @@ and lint with `cargo clippy --workspace --all-targets`.
 | 8 | `close_windows_confirmed` unpersisted | Stays in-memory | Destructive opt-in should not survive a restart. |
 | 9 | Daemon takeover (Prompt 22 option) | CLI-managed lifecycle only; daemon never steals a live endpoint | Predictable: "which daemon is mine?" has one answer; graceful stop+start is the supported handover. |
 | 10 | `examples --install` installs every example | Only file-free examples installable; path-based ones are docs-only | Audio/app/script paths are machine-specific; a broken default path would be worse than a copy-paste command. |
+| 11 | Ping-only liveness probe (Prompt 22) | Two-step probe: connect (listening) then Ping (compatible) | An old binary can't answer Ping; treating it as "not running" spawned a doomed second daemon ("Address already in use"). |
+| 12 | Registration starts the service (`enable --now` / `launchctl load`) | Registration enables/writes only; starting is the CLI's job | The daemon starting a second copy of itself from inside a service manager raced it for the IPC socket. |
+| 13 | `daemon start` always spawns | Prefers systemd/launchd/schtasks when registered (unless env-isolated) | One owner per socket; the unit path is healed when the binary moves (dev vs release). |
+| 14 | Foreground daemon logs to stderr | Level-gated logging to `daemon.log`; terminal shows warn+ | IPC chatter interleaved with typing in a foreground run. |
+| 15 | View exits on resize | Resize re-lays out on the alternate screen | The old render sampled the width once and left wrapped stale content on shrink. |

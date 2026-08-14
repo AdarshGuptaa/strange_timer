@@ -44,6 +44,9 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Completions { shell } => commands::completions::print_completions(shell),
+        Command::InstallCompletions { shell } => {
+            commands::install_completions::install_completions(shell)
+        }
         Command::View { name } => match name.as_str() {
             "timers" => commands::view::view_timers(),
             "buzzers" => commands::buzzers::view_buzzers(),

@@ -34,11 +34,13 @@ target/debug/strangetimer daemon start
 # Terminal 2: the CLI
 target/debug/strangetimer create timer workAndFun 45min 15min
 target/debug/strangetimer run workAndFun -n 3
-target/debug/strangetimer view timers     # press any key to exit the view
+target/debug/strangetimer view timers     # full-screen; press any key to exit
 ```
 
-On first run the daemon registers itself for autostart (systemd/launchd/
-Task Scheduler). Manage it with:
+Every CLI command (except `daemon status`/`daemon stop`) **auto-starts**
+the daemon when it isn't running; `STRANGETIMER_AUTO_START=0` disables
+that. On first run the daemon registers itself for autostart
+(systemd/launchd/Task Scheduler). Manage it with:
 
 ```sh
 target/debug/strangetimer daemon status    # running? pid + version
@@ -52,9 +54,37 @@ is running ("Address already in use"); the CLI commands above are the
 supported way to hand the socket over. To run the daemon in the foreground
 instead (e.g. while hacking on it): `target/debug/strangetimer-daemon`.
 
-`daemon start` locates the daemon binary next to the CLI binary, then on
-`PATH`, and honours the `STRANGETIMER_DAEMON` env var as an override. Its
-stdout/stderr go to `daemon.log` in the data dir.
+### Daemon lifecycle details
+
+- **Probe semantics**: `daemon status/start/stop` first probe the socket
+  with a raw connect; if something accepts but cannot answer `Ping` (e.g.
+  an older binary), it is reported as *incompatible* and `daemon start`
+  refuses to spawn a second instance.
+- **Service-manager awareness (Linux)**: once the systemd user unit
+  exists, `daemon start` heals its `ExecStart` to the current daemon
+  binary and starts via `systemctl --user start`; `daemon stop` stops the
+  service. The isolation env vars (`STRANGETIMER_SOCKET` /
+  `STRANGETIMER_DATA_DIR`) always force a direct spawn, which keeps tests
+  hermetic. Registration itself only *enables* the unit (`--now` was
+  dropped) so it never races a just-spawned daemon for the socket.
+- `daemon start` locates the daemon binary next to the CLI binary, then on
+  `PATH`, and honours the `STRANGETIMER_DAEMON` env var as an override.
+  Its stdout/stderr go to `daemon.log` in the data dir.
+
+### Logging
+
+The daemon logs every message to `daemon.log` in the data dir; the
+terminal only shows messages at or above `STRANGETIMER_LOG` (default:
+`warn`). The chatter ("received ClientMessage::…", "BUZZ: …") is info- or
+debug-level, so a foreground daemon no longer interleaves with your
+typing. Raise it with `STRANGETIMER_LOG=debug` (or `info`).
+
+### Shell completions
+
+`strangetimer install-completions` writes the completion script to the
+per-user location for your shell (bash-completion dir, fish completions,
+`~/.zfunc` for zsh, or prints the PowerShell profile line). `strangetimer
+completions <shell>` prints the raw script.
 
 ### Isolated instances (for testing / demos)
 
@@ -152,7 +182,8 @@ dir or bump the schema). Keep `write_json_atomic`'s unique-temp invariant
 ### Testing checklist for new code
 
 - Unit tests alongside the implementation (scheduler `tick` is factored to
-  be testable without sleeps).
+  be testable without sleeps; the view's layout functions are tested with
+  synthetic widths — see `crates/strangetimer/src/commands/view.rs`).
 - For anything observable across processes, add an e2e case to
   `crates/strangetimer/tests/e2e.rs`.
 - Run `cargo test --workspace` and `cargo clippy --workspace --all-targets`.

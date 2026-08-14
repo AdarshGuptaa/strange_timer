@@ -4,9 +4,6 @@ use std::path::Path;
 pub fn fire_application(path: &Path) {
     match std::process::Command::new(path).spawn() {
         Ok(_) => {}
-        Err(e) => eprintln!(
-            "strangetimer-daemon: failed to launch application {:?}: {e}",
-            path.display()
-        ),
+        Err(e) => warn!("failed to launch application {:?}: {e}", path.display()),
     }
 }

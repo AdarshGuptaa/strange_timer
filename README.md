@@ -21,16 +21,21 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
   or at a specific clock time (`-t HH:MM`).
 - **Managed daemon lifecycle** — `strangetimer daemon start/stop/status/
   restart` starts, stops and checks the background service for you; no
-  manual `&` or `kill` needed.
+  manual `&` or `kill` needed. And because every other command
+  **auto-starts** the daemon on first use, you can go straight from
+  install to `strangetimer create timer …`. (`STRANGETIMER_AUTO_START=0`
+  opts out.)
 - **Live progress view** — `strangetimer view timers` renders animated
-  progress bars with buzzer markers; press any key to exit.
+  progress bars with buzzer markers on a full-screen alternate display; it
+  re-lays out when you resize the terminal and restores your shell on
+  exit. Press any key to exit.
 - **Crash recovery** — the daemon persists every state change atomically and
   fires any alarms that were missed while it was down or the machine was off.
 - **Autostart** — on first run the daemon registers itself as a system
   service (systemd / launchd / Task Scheduler) and resumes persisted runs
   after reboot.
-- **Shell completions** — `strangetimer completions bash|zsh|fish|
-  powershell` prints a completion script for your shell.
+- **Shell completions** — `strangetimer install-completions` wires <Tab>
+  completion into your shell (bash / zsh / fish / powershell).
 
 ## Installation
 
@@ -45,17 +50,24 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
    cp strangetimer strangetimer-daemon ~/.local/bin/
    ```
 
-3. Start the daemon — on first run it registers itself for autostart, so
-   this is the only manual start you will ever need:
+3. Install shell completions so <Tab> works (bash and fish need no rc
+   editing; zsh prints one line to add):
 
    ```sh
-   strangetimer daemon start
+   strangetimer install-completions
    ```
 
-4. Optionally install completions and man pages from the archive:
+4. You're done — the first command you run starts the daemon for you.
+   Optionally take explicit control and register it for autostart (also
+   happens automatically on the first daemon start):
 
    ```sh
-   source <(strangetimer completions bash)   # add to ~/.bashrc
+   strangetimer daemon start      # on first run it registers for autostart
+   ```
+
+5. Man pages from the archive are optional:
+
+   ```sh
    sudo cp man/*.1 /usr/local/share/man/man1/
    ```
 
@@ -64,7 +76,7 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
 ```sh
 cargo install --git https://github.com/AdarshGuptaa/strange_timer \
   strangetimer-daemon --root ~/.local
-strangetimer daemon start
+strangetimer install-completions
 ```
 
 ### From source
@@ -77,15 +89,21 @@ target/release/strangetimer daemon start
 ## Quick Start
 
 ```sh
-strangetimer daemon start
-
-# Create a timer: 45 minutes of work, 15 minutes of fun
+# No need to start the daemon first — this does it for you:
 strangetimer create timer workAndFun 45min 15min
 
-# Run it three times, and watch the live view
+# Run it three times, and watch the live view (press any key to exit)
 strangetimer run workAndFun -n 3
 strangetimer view timers
 ```
+
+The first command that talks to the daemon starts it in the background
+(`strangetimer daemon start` does the same thing explicitly; set
+`STRANGETIMER_AUTO_START=0` to disable). It also registers itself for
+autostart on first run, so after a reboot your timers resume by
+themselves. On Linux the daemon then runs as a systemd user service —
+`strangetimer daemon stop` stops it cleanly, and `daemon status` shows
+the PID and version.
 
 ### Example session
 
@@ -232,10 +250,13 @@ strangetimer create buzzer dayEnd \
 
 | Command | Description |
 |---|---|
-| `strangetimer daemon start` | Start the daemon in the background (no-op if running). |
+| `strangetimer daemon start` | Start the daemon in the background (no-op if running; uses the systemd/launchd/schtasks service when one is registered). |
 | `strangetimer daemon stop` | Gracefully stop the daemon — it saves state and exits. |
 | `strangetimer daemon status` | Is it running? Reports PID and version. |
 | `strangetimer daemon restart` | Stop, then start. |
+
+Any other command auto-starts the daemon if it isn't running
+(`STRANGETIMER_AUTO_START=0` disables this).
 
 ### Timer lifecycle
 
@@ -266,9 +287,10 @@ are seeded on first run and cannot be deleted.
 
 | Command | Description |
 |---|---|
-| `strangetimer view timers` | Live-animated overview of every active run. |
+| `strangetimer view timers` | Live-animated overview of every active run (full-screen; re-lays out on resize). |
 | `strangetimer view <timer_name>` | Single-timer progress block + buzzer countdown table. |
 | `strangetimer completions <bash\|zsh\|fish\|powershell>` | Print a shell completion script. |
+| `strangetimer install-completions [--shell <shell>]` | Install completions into your shell (detects `$SHELL`). |
 
 When stdout is not a terminal, views render as a static snapshot instead of
 animating.
@@ -295,9 +317,13 @@ All state lives under the OS-appropriate user data directory:
 | Windows | `%APPDATA%\strangetimer\` |
 
 `timers.json`, `buzzers.json` and `state.json` are written atomically on
-every change. The daemon and CLI honour `STRANGETIMER_DATA_DIR` and
-`STRANGETIMER_SOCKET` environment overrides (used by the test suite), and
-`STRANGETIMER_DAEMON` points `daemon start` at a specific daemon binary.
+every change. The daemon appends a timestamped log to `daemon.log` in the
+same directory (warnings also reach the terminal; set `STRANGETIMER_LOG=
+debug|info|warn` to tune that). The daemon and CLI honour
+`STRANGETIMER_DATA_DIR` and `STRANGETIMER_SOCKET` environment overrides
+(used by the test suite), `STRANGETIMER_DAEMON` points `daemon start` at a
+specific daemon binary, and `STRANGETIMER_AUTO_START=0` disables
+transparent daemon auto-starting.
 
 ## Architecture in Brief
 

@@ -15,9 +15,7 @@ pub async fn fire_llm(model: &str, prompt: &LlmPromptSource) {
     let prompt_text = match resolve_prompt(prompt).await {
         Ok(t) => t,
         Err(e) => {
-            eprintln!(
-                "strangetimer-daemon: cannot read LLM prompt for model {model}: {e}"
-            );
+            warn!("cannot read LLM prompt for model {model}: {e}");
             return;
         }
     };
@@ -39,9 +37,7 @@ pub async fn fire_llm(model: &str, prompt: &LlmPromptSource) {
     let response = match response {
         Ok(r) => r,
         Err(e) => {
-            eprintln!(
-                "strangetimer-daemon: Ollama unavailable ({e}) — falling back to default audio"
-            );
+            warn!("Ollama unavailable ({e}) — falling back to default audio");
             audio::fire_audio(None);
             return;
         }
@@ -50,8 +46,8 @@ pub async fn fire_llm(model: &str, prompt: &LlmPromptSource) {
     let body: OllamaResponse = match response.json().await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!(
-                "strangetimer-daemon: Ollama returned an unexpected response ({e}) — \
+            warn!(
+                "Ollama returned an unexpected response ({e}) — \
                  falling back to default audio"
             );
             audio::fire_audio(None);

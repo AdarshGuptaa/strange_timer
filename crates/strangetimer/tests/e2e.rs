@@ -4,6 +4,7 @@
 //! Run with `cargo test --workspace` (builds every binary first).
 
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -311,7 +312,8 @@ fn persistence_files_are_isolated() {
 }
 
 /// `strangetimer daemon status/stop/start` drive the daemon process through
-/// its full lifecycle without killing it by signal.
+/// its full lifecycle without killing it by signal — three full cycles, so
+/// the "starting more than twice fails" regression stays dead.
 #[test]
 fn daemon_lifecycle_via_cli() {
     let mut guard = DaemonGuard::start(TestEnv::new("daemon-lifecycle"));
@@ -328,26 +330,28 @@ fn daemon_lifecycle_via_cli() {
     let out = expect_success(&guard, &["daemon", "status"]);
     assert!(out.contains("not running"), "expected stopped:\n{out}");
 
-    // start → spawns a fresh daemon, status comes back
-    let out = expect_success(&guard, &["daemon", "start"]);
-    assert!(out.contains("Started"), "{out}");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let out = guard.cli(&["daemon", "status"]);
-        if stdout_text(&out).contains("is running") {
-            break;
+    for cycle in 1..=3 {
+        // start → spawns a fresh daemon, status comes back
+        let out = expect_success(&guard, &["daemon", "start"]);
+        assert!(out.contains("Started"), "cycle {cycle}:\n{out}");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let out = guard.cli(&["daemon", "status"]);
+            if stdout_text(&out).contains("is running") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not restart in cycle {cycle}:\n{}",
+                stdout_text(&out)
+            );
+            std::thread::sleep(Duration::from_millis(200));
         }
-        assert!(
-            Instant::now() < deadline,
-            "daemon did not restart:\n{}",
-            stdout_text(&out)
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
 
-    // stop again so the guard teardown has nothing to kill
-    expect_success(&guard, &["daemon", "stop"]);
-    guard.child.wait().ok();
+        // stop again so the next cycle starts from a clean state.
+        expect_success(&guard, &["daemon", "stop"]);
+        guard.child.wait().ok();
+    }
 }
 
 /// `strangetimer examples` lists copy-paste commands and `--install` seeds
@@ -410,4 +414,141 @@ fn close_app_and_focus_window_buzzers() {
     assert!(out.contains("close_app"), "{out}");
     assert!(out.contains("focus_window"), "{out}");
     assert!(out.contains("confirm-destructive"), "{out}");
+}
+
+/// A listener that accepts but cannot answer IPC (like an old-version
+/// daemon) must be detected as *incompatible*: `daemon start` must refuse
+/// to spawn a second instance instead of reporting "Address already in use"
+/// after a timeout.
+#[test]
+fn start_refuses_when_incompatible_listener_present() {
+    let env = TestEnv::new("incompatible");
+
+    // Simulate an old daemon: bind the socket, swallow requests, close
+    // without ever answering (exactly what a pre-Ping binary does when it
+    // fails to parse an unknown message variant).
+    let listener =
+        std::sync::Arc::new(std::os::unix::net::UnixListener::bind(&env.socket).unwrap());
+    let server = std::sync::Arc::clone(&listener);
+    std::thread::spawn(move || {
+        for stream in server.incoming() {
+            let Ok(mut s) = stream else { break };
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            drop(s);
+        }
+    });
+
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["daemon", "start"])
+        .output()
+        .expect("failed to run strangetimer CLI");
+    assert!(
+        !out.status.success(),
+        "daemon start should refuse an incompatible listener"
+    );
+    let err = stderr_text(&out);
+    assert!(
+        err.contains("not a compatible"),
+        "expected incompatible-listener error:\n{err}"
+    );
+
+    // status reports the same, and no new daemon took over the socket.
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout_text(&out).contains("not a compatible"),
+        "{}",
+        stdout_text(&out)
+    );
+
+    drop(listener);
+    let _ = fs::remove_dir_all(&env.dir);
+}
+
+/// Transparent auto-start: a command succeeds even when no daemon has been
+/// started yet, and a daemon is running afterwards.
+#[test]
+fn commands_auto_start_the_daemon() {
+    let env = TestEnv::new("auto-start");
+    env.pre_seed_registered();
+
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["view", "buzzers"])
+        .output()
+        .expect("failed to run strangetimer CLI");
+    assert!(
+        out.status.success(),
+        "view buzzers should auto-start the daemon:\n{}",
+        stderr_text(&out)
+    );
+    assert!(
+        stdout_text(&out).contains("default_audio"),
+        "{}",
+        stdout_text(&out)
+    );
+
+    // The daemon is now up (started by the CLI)…
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout_text(&out).contains("is running"),
+        "{}",
+        stdout_text(&out)
+    );
+
+    // …and can be stopped cleanly.
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_text(&out));
+    let _ = fs::remove_dir_all(&env.dir);
+}
+
+/// `daemon stop` must not auto-start the daemon — it reports "not running".
+#[test]
+fn stop_does_not_auto_start() {
+    let env = TestEnv::new("stop-no-autostart");
+    env.pre_seed_registered();
+
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_text(&out));
+    assert!(
+        stdout_text(&out).contains("not running"),
+        "{}",
+        stdout_text(&out)
+    );
+
+    let out = Command::new(cli_binary())
+        .env("STRANGETIMER_DATA_DIR", &env.dir)
+        .env("STRANGETIMER_SOCKET", &env.socket)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout_text(&out).contains("not running"),
+        "{}",
+        stdout_text(&out)
+    );
+    let _ = fs::remove_dir_all(&env.dir);
 }

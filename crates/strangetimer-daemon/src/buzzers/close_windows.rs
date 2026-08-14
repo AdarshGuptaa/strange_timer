@@ -8,7 +8,7 @@ pub fn fire_close_windows(daemon_pid: u32) {
     #[cfg(target_os = "linux")]
     {
         if let Err(e) = close_linux(daemon_pid) {
-            eprintln!("strangetimer-daemon: close_windows failed: {e}");
+            warn!("close_windows failed: {e}");
         }
     }
     #[cfg(target_os = "macos")]
@@ -26,7 +26,7 @@ end tell"#,
             pid = daemon_pid
         );
         if let Err(e) = Command::new("osascript").arg("-e").arg(&script).status() {
-            eprintln!("strangetimer-daemon: osascript failed: {e}");
+            warn!("osascript failed: {e}");
         }
     }
     #[cfg(target_os = "windows")]
@@ -39,7 +39,7 @@ end tell"#,
             .args(["/FI", "STATUS eq RUNNING"])
             .status();
         if let Err(e) = res {
-            eprintln!("strangetimer-daemon: taskkill failed: {e}");
+            warn!("taskkill failed: {e}");
         }
     }
 }
@@ -52,8 +52,8 @@ fn close_linux(daemon_pid: u32) -> anyhow::Result<()> {
     } else if xdotool_available() {
         close_xdotool(daemon_pid)
     } else {
-        eprintln!(
-            "strangetimer-daemon: neither wmctrl nor xdotool found; \
+        warn!(
+            "neither wmctrl nor xdotool found; \
              cannot close windows. Install one of them to use close_windows."
         );
         Ok(())
@@ -118,7 +118,12 @@ fn close_xdotool(daemon_pid: u32) -> anyhow::Result<()> {
             .args(["getwindowpid", id])
             .output()
             .ok()
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            });
         if pid == Some(daemon_pid) {
             continue;
         }

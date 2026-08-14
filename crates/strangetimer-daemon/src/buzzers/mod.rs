@@ -26,7 +26,7 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
         BuzzerAction::CloseAllWindows => {
             let confirmed = state.is_close_windows_confirmed().await;
             if !confirmed {
-                eprintln!(
+                warn!(
                     "WARNING: close_windows buzzer will close ALL open windows.\n\
                      Run `strangetimer confirm-destructive` to enable it."
                 );
@@ -37,7 +37,7 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
         BuzzerAction::CloseApplication(name) => {
             let confirmed = state.is_close_windows_confirmed().await;
             if !confirmed {
-                eprintln!(
+                warn!(
                     "WARNING: close_app buzzer will close the {:?} application.\n\
                      Run `strangetimer confirm-destructive` to enable it.",
                     name

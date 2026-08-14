@@ -111,7 +111,7 @@ pub async fn tick(state: Arc<AppState>) -> Vec<String> {
 
     if state_changed {
         if let Err(e) = save_state(&inner.state) {
-            eprintln!("strangetimer-daemon: scheduler failed to save state: {e:#}");
+            warn!("scheduler failed to save state: {e:#}");
         }
     }
 

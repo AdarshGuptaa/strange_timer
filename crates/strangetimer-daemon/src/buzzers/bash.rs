@@ -17,9 +17,6 @@ pub fn fire_bash(path: &Path) {
 
     match cmd.spawn() {
         Ok(_) => {}
-        Err(e) => eprintln!(
-            "strangetimer-daemon: failed to run script {:?}: {e}",
-            path.display()
-        ),
+        Err(e) => warn!("failed to run script {:?}: {e}", path.display()),
     }
 }
