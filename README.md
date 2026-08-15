@@ -83,7 +83,7 @@ it); Windows: `install.ps1 -Uninstall`.
    your `PATH`:
 
    ```sh
-   tar -xzf strangetimer-linux-x86_64.tar.gz
+   tar -xzf strangetimer-v1.0.0-beta.1-linux-x86_64.tar.gz
    cp strangetimer strangetimer-daemon ~/.local/bin/
    cp -r assets ~/.local/share/strangetimer-assets/   # or beside the daemon
    ```

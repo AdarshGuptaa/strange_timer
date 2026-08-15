@@ -55,7 +55,7 @@ if (-not $Version) {
 }
 Say "Installing StrangeTimer $Version (windows-$arch) into $Root"
 
-$archive = "strangetimer-windows-$arch.zip"
+$archive = "strangetimer-$Version-windows-$arch.zip"
 $url = "https://github.com/$Repo/releases/download/$Version/$archive"
 $tmp = Join-Path $env:TEMP ("strangetimer-" + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $tmp | Out-Null

@@ -1,9 +1,9 @@
 name: Release
 
 # Cut a release by pushing a tag matching v*:
-#   git tag v0.1.0 && git push origin v0.1.0
-# The workflow tests, builds, packages, verifies and uploads archives for
-# every platform to the GitHub release for that tag.
+#   git tag v1.0.0-beta.1 && git push origin v1.0.0-beta.1
+# The workflow tests, builds, packages, verifies and uploads archives and
+# installers for every platform to the GitHub release for that tag.
 
 on:
   push:
@@ -23,6 +23,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      # rodio needs ALSA headers; reqwest needs OpenSSL. Without these
+      # the alsa-sys build script fails with "Package alsa was not found".
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev
+
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -51,6 +59,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux native dependencies (and help2man for the man page)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev help2man
+
       - name: Build release binaries
         run: cargo build --release --workspace --locked
 
@@ -65,6 +79,7 @@ jobs:
             EXE=
             ZIP=false
           fi
+          ARCHIVE_NAME="strangetimer-${{ env.VERSION }}-${{ matrix.label }}.${{ matrix.archive }}"
           mkdir -p dist/completions dist/man
           cp ./target/release/strangetimer$EXE dist/
           cp ./target/release/strangetimer-daemon$EXE dist/
@@ -81,35 +96,67 @@ jobs:
           # Man page for the CLI only (the daemon has no terminating
           # --help mode; help2man would hang on it).
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            sudo apt-get update && sudo apt-get install -y help2man
             help2man -N -n "StrangeTimer CLI" ./target/release/strangetimer > dist/man/strangetimer.1
           fi
 
           if [ "$ZIP" = "true" ]; then
-            (cd dist && 7z a -tzip ../strangetimer-${{ matrix.label }}.zip *)
+            (cd dist && 7z a -tzip "../$ARCHIVE_NAME" *)
           else
-            tar -C dist -czf strangetimer-${{ matrix.label }}.tar.gz .
+            tar -C dist -czf "$ARCHIVE_NAME" .
           fi
 
-      - name: Generate checksums and release manifest
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+
+      - name: Generate per-platform manifest
         shell: bash
         run: |
-          sha256sum strangetimer-${{ matrix.label }}.${{ matrix.archive }} > checksums.txt
           {
-            echo "version=$VERSION"
+            echo "version=${{ env.VERSION }}"
             echo "platform=${{ matrix.label }}"
-            echo "archive=strangetimer-${{ matrix.label }}.${{ matrix.archive }}"
-            echo "sha256=$(cut -d' ' -f1 checksums.txt)"
+            echo "archive=$ARCHIVE_NAME"
+            echo "sha256=$(sha256sum "$ARCHIVE_NAME" | cut -d' ' -f1)"
           } > manifest-${{ matrix.label }}.txt
-          cat checksums.txt
           cat manifest-${{ matrix.label }}.txt
 
-      - name: Upload release artifacts
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.label }}
+          path: |
+            ${{ env.ARCHIVE_NAME }}
+            manifest-${{ matrix.label }}.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate global checksums and verify artifacts
+        shell: bash
+        run: |
+          cd release-assets
+          ls -la
+          for f in strangetimer-${{ env.VERSION }}-*; do
+            test -s "$f" || { echo "empty artifact: $f" >&2; exit 1; }
+          done
+          sha256sum strangetimer-${{ env.VERSION }}-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub release and upload assets
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           files: |
-            strangetimer-${{ matrix.label }}.${{ matrix.archive }}
-            manifest-${{ matrix.label }}.txt
+            release-assets/*
             scripts/install.sh
             scripts/install.ps1
           fail_on_unmatched_files: true
@@ -121,17 +168,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev
+
       - name: Build and package a local linux archive
         run: |
           cargo build --release --workspace --locked
-          mkdir -p dist && cp target/release/strangetimer target/release/strangetimer-daemon dist/
+          mkdir -p dist
+          cp target/release/strangetimer target/release/strangetimer-daemon dist/
           cp -r crates/strangetimer-daemon/assets dist/
-          tar -C dist -czf strangetimer-linux-x86_64.tar.gz .
+          tar -C dist -czf strangetimer-${{ env.VERSION }}-linux-x86_64.tar.gz .
+
       - name: Extract and verify the archive
         run: |
-          tar -xzf strangetimer-linux-x86_64.tar.gz
-          ./strangetimer --version
-          test -f ./strangetimer-daemon
+          tar -xzf strangetimer-${{ env.VERSION }}-linux-x86_64.tar.gz
+          ./strangetimer --version | grep -q "${VERSION#v}"
+          test -x ./strangetimer-daemon
           test -f ./assets/default.mp4
           test -f ./assets/chime.wav
           ./strangetimer completions bash | grep -q COMPLETE=
@@ -143,4 +198,29 @@ jobs:
           ./strangetimer daemon start
           ./strangetimer create timer smoke 5m --no-preview
           ./strangetimer view timers --snapshot | grep -q "INACTIVE TIMERS"
+          ./strangetimer doctor | grep -q "Daemon: running"
           ./strangetimer daemon stop
+
+  release-check:
+    name: Release artifacts check
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release assets exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ env.VERSION }}" --json assets -q '.assets[].name' > assets.txt
+          cat assets.txt
+          for expected in \
+            "strangetimer-${{ env.VERSION }}-linux-x86_64.tar.gz" \
+            "strangetimer-${{ env.VERSION }}-macos-x86_64.tar.gz" \
+            "strangetimer-${{ env.VERSION }}-macos-aarch64.tar.gz" \
+            "strangetimer-${{ env.VERSION }}-windows-x86_64.zip" \
+            "checksums.txt" \
+            "install.sh" \
+            "install.ps1"; do
+            grep -qx "$expected" assets.txt || { echo "missing asset: $expected" >&2; exit 1; }
+          done
+          echo "All release assets present."

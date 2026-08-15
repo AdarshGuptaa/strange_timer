@@ -95,7 +95,7 @@ if [ -z "$VERSION" ]; then
 fi
 say "Installing StrangeTimer $VERSION ($PLATFORM-$ARCH) into $INSTALL_ROOT"
 
-ARCHIVE="strangetimer-$PLATFORM-$ARCH.tar.gz"
+ARCHIVE="strangetimer-$VERSION-$PLATFORM-$ARCH.tar.gz"
 BASE="${ST_URL_BASE:-https://github.com/$REPO/releases/download/$VERSION}"
 URL="$BASE/$ARCHIVE"
 SUMS_URL="$BASE/checksums.txt"

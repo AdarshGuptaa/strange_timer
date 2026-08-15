@@ -25,10 +25,7 @@ pub fn parse_offset(s: &str) -> Result<Duration, String> {
             i += 1;
         }
         if start == i {
-            return Err(format!(
-                "expected a digit at position {} in {:?}",
-                start, s
-            ));
+            return Err(format!("expected a digit at position {} in {:?}", start, s));
         }
         let n: i64 = s[start..i]
             .parse()
@@ -40,15 +37,11 @@ pub fn parse_offset(s: &str) -> Result<Duration, String> {
             i += 1;
         }
         if unit_start == i {
-            return Err(format!(
-                "missing unit suffix after {} in {:?}",
-                n, s
-            ));
+            return Err(format!("missing unit suffix after {} in {:?}", n, s));
         }
         let unit = &s[unit_start..i];
-        let part = unit_to_duration(n, unit).map_err(|e| {
-            format!("unrecognised unit {:?} in {:?}: {}", unit, s, e)
-        })?;
+        let part = unit_to_duration(n, unit)
+            .map_err(|e| format!("unrecognised unit {:?} in {:?}: {}", unit, s, e))?;
         total += part;
     }
 
