@@ -201,6 +201,14 @@ pub enum Command {
         #[arg(long, value_enum)]
         shell: Option<Shell>,
     },
+    /// Report installation health and optional capabilities.
+    #[command(after_help = "Examples:\n\
+    \n\
+      strangetimer doctor\n\
+    \n\
+    Shows the CLI/daemon versions and protocol, the session type, and\n\
+    which optional tools (wmctrl, xdotool, pkill, Ollama) are available.")]
+    Doctor,
     /// Watch buzzer-ringing notifications as they fire.
     #[command(after_help = "Examples:\n\
     \n\
@@ -274,6 +282,12 @@ pub enum DaemonCommand {
     \n\
     Equivalent to `daemon stop` followed by `daemon start`.")]
     Restart,
+    /// Register the OS autostart service (idempotent).
+    Enable,
+    /// Disable the OS autostart service (keeps the installed files).
+    Disable,
+    /// Stop the daemon and remove its autostart registration.
+    Uninstall,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

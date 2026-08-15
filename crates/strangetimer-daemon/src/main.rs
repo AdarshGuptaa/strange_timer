@@ -532,9 +532,38 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             state.set_close_windows_confirmed().await;
             ServerMessage::Ok
         }
+        ClientMessage::EnableAutostart => match platform::register_autostart() {
+            Ok(()) => {
+                state
+                    .update_state(|s| s.registered = true)
+                    .await
+                    .unwrap_or_else(|e| warn!("failed to persist autostart flag: {e:#}"));
+                ServerMessage::Ok
+            }
+            Err(e) => ServerMessage::Error(e.to_string()),
+        },
+        ClientMessage::DisableAutostart => match platform::disable_autostart() {
+            Ok(()) => {
+                state
+                    .update_state(|s| s.registered = false)
+                    .await
+                    .unwrap_or_else(|e| warn!("failed to persist autostart flag: {e:#}"));
+                ServerMessage::Ok
+            }
+            Err(e) => ServerMessage::Error(e.to_string()),
+        },
+        ClientMessage::UninstallService => {
+            let _ = platform::disable_autostart();
+            state
+                .update_state(|s| s.registered = false)
+                .await
+                .unwrap_or_else(|e| warn!("failed to persist autostart flag: {e:#}"));
+            ServerMessage::Ok
+        }
         ClientMessage::Ping => ServerMessage::Status {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol: strangetimer_core::ipc::IPC_PROTOCOL_VERSION,
         },
         ClientMessage::GetEvents { after_id } => {
             ServerMessage::BuzzerEvents(state.events_after(after_id).await)
@@ -576,6 +605,9 @@ fn variant_name(msg: &ClientMessage) -> &'static str {
         ClientMessage::GetBuzzerDetail { .. } => "GetBuzzerDetail",
         ClientMessage::DeleteBuzzerCascade { .. } => "DeleteBuzzerCascade",
         ClientMessage::ConfirmDestructive => "ConfirmDestructive",
+        ClientMessage::EnableAutostart => "EnableAutostart",
+        ClientMessage::DisableAutostart => "DisableAutostart",
+        ClientMessage::UninstallService => "UninstallService",
         ClientMessage::Ping => "Ping",
         ClientMessage::Shutdown => "Shutdown",
         ClientMessage::GetEvents { .. } => "GetEvents",

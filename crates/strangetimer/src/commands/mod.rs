@@ -3,6 +3,7 @@ pub mod candidates;
 pub mod completions;
 pub mod control;
 pub mod daemon;
+pub mod doctor;
 pub mod examples;
 pub mod install_completions;
 pub mod timers;

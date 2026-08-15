@@ -45,44 +45,68 @@ strangetimer-core     ← shared library (data model, persistence, IPC protocol)
 
 ## Installation
 
-### From a GitHub release (recommended)
+### One-command install (recommended)
+
+**Linux / macOS** (installs into `~/.local`, no sudo, sets up PATH,
+completions, autostart, and starts the daemon):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/AdarshGuptaa/strange_timer/releases/latest/download/install.sh | sh
+```
+
+Open a new terminal, then:
+
+```sh
+strangetimer create timer demo 1m
+strangetimer run demo
+strangetimer view timers
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://github.com/AdarshGuptaa/strange_timer/releases/latest/download/install.ps1 | iex
+```
+
+The installer verifies checksums, installs atomically, updates the
+versioned `current` symlink, and keeps your timer data across updates.
+
+Uninstall: `install.sh --uninstall` (keeps data) / `--purge-data` (wipes
+it); Windows: `install.ps1 -Uninstall`.
+
+### From a GitHub release (manual)
 
 1. Download the archive for your platform from the
    [releases page](https://github.com/AdarshGuptaa/strange_timer/releases).
-2. Extract it and put both binaries somewhere on your `PATH`:
+2. Extract it and put both binaries AND the `assets/` folder somewhere on
+   your `PATH`:
 
    ```sh
    tar -xzf strangetimer-linux-x86_64.tar.gz
    cp strangetimer strangetimer-daemon ~/.local/bin/
+   cp -r assets ~/.local/share/strangetimer-assets/   # or beside the daemon
    ```
 
-3. Install shell completions so <Tab> works (bash and fish need no rc
-   editing; zsh prints one line to add):
+3. Install shell completions:
 
    ```sh
    strangetimer install-completions
    ```
 
-4. You're done — the first command you run starts the daemon for you.
-   Optionally take explicit control and register it for autostart (also
-   happens automatically on the first daemon start):
+4. Start the daemon (it registers autostart on first run):
 
    ```sh
-   strangetimer daemon start      # on first run it registers for autostart
-   ```
-
-5. Man pages from the archive are optional:
-
-   ```sh
-   sudo cp man/*.1 /usr/local/share/man/man1/
+   strangetimer daemon start
    ```
 
 ### With Cargo
 
 ```sh
-cargo install --git https://github.com/AdarshGuptaa/strange_timer \
-  strangetimer-daemon --root ~/.local
+cargo install --locked --git https://github.com/AdarshGuptaa/strange_timer \
+  strangetimer strangetimer-daemon --root ~/.local
 strangetimer install-completions
+strangetimer daemon start
 ```
 
 ### From source
@@ -113,7 +137,9 @@ The first command that talks to the daemon starts it in the background
 autostart on first run, so after a reboot your timers resume by
 themselves. On Linux the daemon then runs as a systemd user service —
 `strangetimer daemon stop` stops it cleanly, and `daemon status` shows
-the PID and version.
+the PID, version and IPC protocol. `strangetimer daemon enable/disable/
+uninstall` manage the autostart service explicitly, and `strangetimer
+doctor` reports installation health and optional capabilities.
 
 ### Example session
 
@@ -264,6 +290,8 @@ strangetimer create buzzer dayEnd \
 | `strangetimer daemon stop` | Gracefully stop the daemon — it saves state and exits. |
 | `strangetimer daemon status` | Is it running? Reports PID and version. |
 | `strangetimer daemon restart` | Stop, then start. |
+| `strangetimer daemon enable` / `disable` / `uninstall` | Register, disable, or remove the OS autostart service. |
+| `strangetimer doctor` | Report installation health, versions, protocol, and optional capabilities. |
 
 Any other command auto-starts the daemon if it isn't running
 (`STRANGETIMER_AUTO_START=0` disables this).

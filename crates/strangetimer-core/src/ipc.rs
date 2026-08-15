@@ -5,6 +5,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::model::{Buzzer, RepeatMode, Timer, TimerRun};
 
+/// Bumped whenever the IPC wire format changes incompatibly. The CLI
+/// refuses to talk to a daemon with a different protocol and tells the
+/// user to restart the daemon.
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+
 /// Platform-specific name used when binding / connecting to the daemon's
 /// IPC endpoint.
 ///
@@ -92,6 +97,12 @@ pub enum ClientMessage {
     /// Opt-in acknowledgement that the `close_windows` buzzer is allowed to
     /// close all other windows. Guarded by `state.close_windows_confirmed`.
     ConfirmDestructive,
+    /// Register the OS autostart service (idempotent).
+    EnableAutostart,
+    /// Disable the OS autostart service (does not delete installed files).
+    DisableAutostart,
+    /// Stop the daemon and remove its OS autostart registration.
+    UninstallService,
     /// Liveness probe: the daemon answers with `ServerMessage::Status`.
     /// Used by `strangetimer daemon status/start` to detect a running daemon.
     Ping,
@@ -137,10 +148,13 @@ pub enum ServerMessage {
     BuzzerInfoList(Vec<crate::model::BuzzerInfo>),
     /// Reply to `ClientMessage::GetBuzzerDetail`.
     BuzzerDetailInfo(crate::model::BuzzerDetail),
-    /// Reply to `ClientMessage::Ping`: the daemon's process id and version.
+    /// Reply to `ClientMessage::Ping`: the daemon's process id, version
+    /// and IPC protocol revision.
     Status {
         pid: u32,
         version: String,
+        #[serde(default)]
+        protocol: u32,
     },
     /// Reply to `ClientMessage::GetEvents`.
     BuzzerEvents(Vec<crate::model::BuzzerEvent>),

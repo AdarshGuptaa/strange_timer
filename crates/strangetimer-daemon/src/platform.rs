@@ -1,8 +1,7 @@
 //! Platform-specific integrations: media-player window focus and OS
 //! autostart registration.
 
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -40,10 +39,52 @@ pub fn tool(name: &str) -> String {
     std::env::var(&key).unwrap_or_else(|_| name.to_string())
 }
 
+/// The daemon path to bake into service definitions. When installed via
+/// the release installer (`~/.local/lib/strangetimer/<version>`), the
+/// stable `current` symlink is used so updates never break autostart.
+pub fn stable_service_path() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("cannot resolve daemon binary path")?;
+    if let Some(home) = dirs::home_dir() {
+        let install_root = home.join(".local/lib/strangetimer");
+        if exe.starts_with(&install_root) {
+            // <root>/<version>/strangetimer-daemon -> <root>/current/<bin>
+            if let Some(name) = exe.file_name() {
+                let candidate = install_root.join("current").join(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    Ok(exe)
+}
+
+/// Refuse to register autostart from a dev checkout: `target/debug` or
+/// `target/release` paths are not stable install locations.
+fn reject_dev_path(path: &std::path::Path) -> Result<()> {
+    let text = path.to_string_lossy();
+    if text.contains("/target/") || text.contains("\\target\\") {
+        return Err(anyhow::anyhow!(
+            "refusing to register autostart from a development build ({}) — \
+             install StrangeTimer first (see the README), then run \
+             `strangetimer daemon start`",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Shell-quote a path for use in a systemd ExecStart line.
+fn sh_quote(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\'', "'\\''");
+    format!("'{text}'")
+}
+
 /// Register the daemon binary as an OS autostart service so it comes back up
 /// after a reboot and can resume persisted runs.
 pub fn register_autostart() -> Result<()> {
-    let daemon_path = std::env::current_exe().context("cannot resolve daemon binary path")?;
+    let daemon_path = stable_service_path()?;
+    reject_dev_path(&daemon_path)?;
 
     #[cfg(target_os = "linux")]
     {
@@ -72,18 +113,21 @@ pub fn register_autostart() -> Result<()> {
                 }
             }
         }
+        let path_line = sh_quote(&daemon_path);
+        let path_env =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
         let unit = format!(
             "[Unit]\n\
              Description=StrangeTimer Daemon\n\
              After=network.target\n\
              \n\
              [Service]\n\
-             ExecStart={}\n\
+             ExecStart={path_line}\n\
              Restart=on-failure\n\
+             Environment=PATH={path_env}\n\
              {env_lines}\
              [Install]\n\
              WantedBy=default.target\n",
-            daemon_path.display()
         );
         std::fs::write(&unit_path, unit)
             .with_context(|| format!("failed to write {}", unit_path.display()))?;
@@ -139,6 +183,7 @@ pub fn register_autostart() -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
+        let tr = format!("\"{}\"", daemon_path.display());
         run(
             "schtasks",
             &[
@@ -148,9 +193,9 @@ pub fn register_autostart() -> Result<()> {
                 "/SC",
                 "ONLOGON",
                 "/TR",
-                &daemon_path.to_string_lossy(),
+                &tr,
                 "/RL",
-                "HIGHEST",
+                "LIMITED",
                 "/F",
             ],
         )?;
@@ -161,6 +206,41 @@ pub fn register_autostart() -> Result<()> {
     {
         Err(anyhow::anyhow!(
             "autostart registration is not supported on this platform"
+        ))
+    }
+}
+
+/// Disable autostart without deleting the installed binaries.
+pub fn disable_autostart() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        run("systemctl", &["--user", "disable", "--now", "strangetimer"])?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(dir) = home_dir() {
+            let plist = dir.join("Library/LaunchAgents/com.strangetimer.daemon.plist");
+            if plist.exists() {
+                let _ = Command::new("launchctl")
+                    .args(["bootout", "gui/$(id -u)/com.strangetimer.daemon"])
+                    .status();
+                let _ = std::fs::remove_file(&plist);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("schtasks")
+            .args(["/Delete", "/TN", "StrangeTimerDaemon", "/F"])
+            .status();
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Err(anyhow::anyhow!(
+            "autostart is not supported on this platform"
         ))
     }
 }

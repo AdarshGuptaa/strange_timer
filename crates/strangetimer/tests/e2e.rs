@@ -547,7 +547,7 @@ fn start_refuses_when_incompatible_listener_present() {
     );
     let err = stderr_text(&out);
     assert!(
-        err.contains("not a compatible"),
+        err.contains("incompatible"),
         "expected incompatible-listener error:\n{err}"
     );
 
@@ -559,7 +559,7 @@ fn start_refuses_when_incompatible_listener_present() {
         .output()
         .unwrap();
     assert!(
-        stdout_text(&out).contains("not a compatible"),
+        stdout_text(&out).contains("incompatible"),
         "{}",
         stdout_text(&out)
     );

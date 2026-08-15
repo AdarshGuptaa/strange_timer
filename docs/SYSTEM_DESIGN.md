@@ -447,6 +447,23 @@ This is what makes StrangeTimer's persistence meaningful: kill the daemon,
 reboot the machine, and when it comes back the alarms that were due during
 the downtime all go off immediately.
 
+### 8.2a IPC protocol compatibility
+
+`IPC_PROTOCOL_VERSION` (core) is bumped on wire-format changes. The
+daemon includes it in `ServerMessage::Status`; the CLI's probe refuses to
+treat a mismatched daemon as "running", reports the incompatibility, and
+directs the user to `strangetimer daemon restart`. This converts the old
+confusing `failed to read IPC response: failed to fill whole buffer`
+failures into an actionable message when binaries get out of sync.
+
+### 8.2b Service registration
+
+`register_autostart` now resolves the stable service path (the installer
+places a `current` symlink under `~/.local/lib/strangetimer`), refuses
+dev-tree paths, shell-quotes `ExecStart`, sets `PATH`, and uses
+`RL LIMITED` with a quoted path on Windows. `daemon enable/disable/
+uninstall` IPC messages let the CLI manage the service explicitly.
+
 ### 8.3 Shutdown
 
 Three ways to stop the daemon, all ending in the same save-and-exit path:

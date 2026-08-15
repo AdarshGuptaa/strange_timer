@@ -2,8 +2,8 @@ name: Release
 
 # Cut a release by pushing a tag matching v*:
 #   git tag v0.1.0 && git push origin v0.1.0
-# The workflow tests, builds, packages and uploads archives for every
-# platform to the GitHub release for that tag.
+# The workflow tests, builds, packages, verifies and uploads archives for
+# every platform to the GitHub release for that tag.
 
 on:
   push:
@@ -13,6 +13,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VERSION: ${{ github.ref_name }}
+
 jobs:
   test:
     name: Test (ubuntu)
@@ -20,8 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   build:
     name: Package ${{ matrix.label }}
@@ -49,40 +52,95 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binaries
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace --locked
 
-      - name: Generate shell completions
-        shell: bash
-        run: |
-          mkdir -p dist/completions
-          ./target/release/strangetimer completions bash > dist/completions/strangetimer.bash
-          ./target/release/strangetimer completions zsh  > dist/completions/_strangetimer
-          ./target/release/strangetimer completions fish > dist/completions/strangetimer.fish
-
-      - name: Generate man pages (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update && sudo apt-get install -y help2man
-          mkdir -p dist/man
-          help2man -N -n "StrangeTimer CLI" ./target/release/strangetimer > dist/man/strangetimer.1
-          help2man -N -n "StrangeTimer background daemon" ./target/release/strangetimer-daemon > dist/man/strangetimer-daemon.1
-
+      # Platform-aware executable suffix (empty on unix, ".exe" on Windows).
       - name: Assemble archive
         shell: bash
         run: |
-          cp ./target/release/strangetimer dist/
-          cp ./target/release/strangetimer-daemon dist/
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            EXE=.exe
+            ZIP=true
+          else
+            EXE=
+            ZIP=false
+          fi
+          mkdir -p dist/completions dist/man
+          cp ./target/release/strangetimer$EXE dist/
+          cp ./target/release/strangetimer-daemon$EXE dist/
           cp -r ./crates/strangetimer-daemon/assets dist/
           cp ./LICENSE dist/
           cp ./README.md dist/
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cd dist && 7z a -tzip ../strangetimer-${{ matrix.label }}.zip *
+
+          # Shell completions from the real binary (PATH-resolved scripts).
+          ./target/release/strangetimer$EXE completions bash > dist/completions/strangetimer.bash
+          ./target/release/strangetimer$EXE completions zsh  > dist/completions/_strangetimer
+          ./target/release/strangetimer$EXE completions fish > dist/completions/strangetimer.fish
+          ./target/release/strangetimer$EXE completions powershell > dist/completions/_strangetimer.ps1
+
+          # Man page for the CLI only (the daemon has no terminating
+          # --help mode; help2man would hang on it).
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            sudo apt-get update && sudo apt-get install -y help2man
+            help2man -N -n "StrangeTimer CLI" ./target/release/strangetimer > dist/man/strangetimer.1
+          fi
+
+          if [ "$ZIP" = "true" ]; then
+            (cd dist && 7z a -tzip ../strangetimer-${{ matrix.label }}.zip *)
           else
             tar -C dist -czf strangetimer-${{ matrix.label }}.tar.gz .
           fi
 
+      - name: Generate checksums and release manifest
+        shell: bash
+        run: |
+          sha256sum strangetimer-${{ matrix.label }}.${{ matrix.archive }} > checksums.txt
+          {
+            echo "version=$VERSION"
+            echo "platform=${{ matrix.label }}"
+            echo "archive=strangetimer-${{ matrix.label }}.${{ matrix.archive }}"
+            echo "sha256=$(cut -d' ' -f1 checksums.txt)"
+          } > manifest-${{ matrix.label }}.txt
+          cat checksums.txt
+          cat manifest-${{ matrix.label }}.txt
+
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: strangetimer-${{ matrix.label }}.${{ matrix.archive }}
+          files: |
+            strangetimer-${{ matrix.label }}.${{ matrix.archive }}
+            manifest-${{ matrix.label }}.txt
+            scripts/install.sh
+            scripts/install.ps1
           fail_on_unmatched_files: true
+
+  smoke-test:
+    name: Smoke test (linux-x86_64)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and package a local linux archive
+        run: |
+          cargo build --release --workspace --locked
+          mkdir -p dist && cp target/release/strangetimer target/release/strangetimer-daemon dist/
+          cp -r crates/strangetimer-daemon/assets dist/
+          tar -C dist -czf strangetimer-linux-x86_64.tar.gz .
+      - name: Extract and verify the archive
+        run: |
+          tar -xzf strangetimer-linux-x86_64.tar.gz
+          ./strangetimer --version
+          test -f ./strangetimer-daemon
+          test -f ./assets/default.mp4
+          test -f ./assets/chime.wav
+          ./strangetimer completions bash | grep -q COMPLETE=
+          ./strangetimer completions fish | grep -q "strangetimer"
+          ./strangetimer install-completions --shell bash
+          export STRANGETIMER_DATA_DIR="$PWD/data" STRANGETIMER_SOCKET="$PWD/st.sock"
+          mkdir -p "$STRANGETIMER_DATA_DIR"
+          printf '{"runs":[],"registered":true,"last_saved_at":null}' > "$STRANGETIMER_DATA_DIR/state.json"
+          ./strangetimer daemon start
+          ./strangetimer create timer smoke 5m --no-preview
+          ./strangetimer view timers --snapshot | grep -q "INACTIVE TIMERS"
+          ./strangetimer daemon stop

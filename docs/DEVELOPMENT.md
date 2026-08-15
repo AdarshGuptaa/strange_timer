@@ -349,6 +349,25 @@ dir or bump the schema). Keep `write_json_atomic`'s unique-temp invariant
 Only Linux has been exercised in CI; macOS/Windows paths are implemented
 but untested — report issues if you hit them.
 
+## Installing for users
+
+The release pipeline ships a one-command installer for every platform:
+
+- Linux/macOS: `scripts/install.sh` (user-local `~/.local`, checksum
+  verified, atomic versioned install with a `current` symlink, PATH and
+  completions setup, autostart registration, daemon start, health check,
+  `--uninstall` / `--purge-data`).
+- Windows: `scripts/install.ps1` (same flow in `%LOCALAPPDATA%`).
+
+Both are uploaded as release assets named `install.sh` / `install.ps1`
+so the documented `curl ... | sh` and `irm ... | iex` one-liners work.
+
+Autostart registration now uses a stable service path (the installer's
+`current` symlink) and refuses to register from a `target/debug` or
+`target/release` checkout. The daemon reports an IPC protocol version
+(`IPC_PROTOCOL_VERSION`); the CLI refuses to talk to a mismatched daemon
+and points the user at `strangetimer daemon restart`.
+
 ## Releasing
 
 Cutting a release is tag-driven: `.github/workflows/release.yml` runs the

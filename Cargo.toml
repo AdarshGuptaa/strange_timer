@@ -9,6 +9,7 @@ members = [
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
+rust-version = "1.75"
 authors = ["Adarsh Gupta"]
 description = "A background-daemon CLI timer with a reusable buzzer library (audio, video, URL, apps, scripts, windows, LLM)."
 license = "MIT"

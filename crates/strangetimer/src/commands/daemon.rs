@@ -21,7 +21,7 @@ use strangetimer_core::ipc::{ClientMessage, ServerMessage};
 use strangetimer_core::persistence::data_dir;
 
 use crate::cli::DaemonCommand;
-use crate::commands::{send_and_receive, try_connect};
+use crate::commands::{ensure_ok, send_and_receive, try_connect};
 use crate::style;
 
 /// How long to wait for the daemon to appear / disappear after a lifecycle
@@ -33,10 +33,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Probe {
     /// A compatible daemon answered `Ping`.
-    Running { pid: u32, version: String },
-    /// Something is listening but cannot answer `Ping` (older binary or a
-    /// foreign process on our socket).
-    Incompatible,
+    Running {
+        pid: u32,
+        version: String,
+        protocol: u32,
+    },
+    /// Something is listening but cannot answer `Ping` (older binary, a
+    /// protocol mismatch, or a foreign process on our socket).
+    Incompatible { reason: String },
     /// Nothing is listening.
     NotRunning,
 }
@@ -55,25 +59,52 @@ pub fn run(cmd: &DaemonCommand) -> Result<()> {
             }
             start()
         }
+        DaemonCommand::Enable => {
+            ensure_ok(send_and_receive(&ClientMessage::EnableAutostart)?)?;
+            println!(
+                "{}",
+                style::name("Enabled StrangeTimer autostart (system service).")
+            );
+            Ok(())
+        }
+        DaemonCommand::Disable => {
+            ensure_ok(send_and_receive(&ClientMessage::DisableAutostart)?)?;
+            println!("{}", style::name("Disabled StrangeTimer autostart."));
+            Ok(())
+        }
+        DaemonCommand::Uninstall => {
+            ensure_ok(send_and_receive(&ClientMessage::UninstallService)?)?;
+            println!(
+                "{}",
+                style::name("Stopped StrangeTimer and removed its autostart registration.")
+            );
+            Ok(())
+        }
     }
 }
 
 /// `strangetimer daemon status`
 fn status() -> Result<()> {
     match probe() {
-        Probe::Running { pid, version } => {
+        Probe::Running {
+            pid,
+            version,
+            protocol,
+        } => {
             println!(
-                "{} (pid {}, version {}).",
+                "{} (pid {}, version {}, protocol {}).",
                 style::name("strangetimer-daemon is running"),
                 style::accent(&pid.to_string()),
-                style::dim(&version)
+                style::dim(&version),
+                style::dim(&protocol.to_string()),
             );
         }
-        Probe::Incompatible => {
+        Probe::Incompatible { reason } => {
             println!(
-                "{} on {} — not a compatible strangetimer-daemon (is an older version running?)",
+                "{} on {} — {}",
                 style::warn("something is listening"),
-                socket_name()
+                socket_name(),
+                reason
             );
         }
         Probe::NotRunning => {
@@ -99,7 +130,9 @@ pub fn ensure_started(announce: bool) -> Result<()> {
             }
             Ok(())
         }
-        Probe::Incompatible => Err(incompatible_error()),
+        Probe::Incompatible { reason } => Err(anyhow!(
+            "the running strangetimer-daemon is incompatible with this CLI — {reason}"
+        )),
         Probe::NotRunning => {
             start_daemon(announce)?;
             Ok(())
@@ -112,18 +145,33 @@ pub fn ensure_started(announce: bool) -> Result<()> {
 /// detached spawn, and waits for readiness.
 fn start_daemon(verbose: bool) -> Result<Probe> {
     match probe() {
-        Probe::Running { pid, version } => {
+        Probe::Running {
+            pid,
+            version,
+            protocol,
+        } => {
             if verbose {
                 println!(
-                    "{} (pid {}, version {}).",
+                    "{} (pid {}, version {}, protocol {}).",
                     style::name("strangetimer-daemon is already running"),
                     style::accent(&pid.to_string()),
-                    style::dim(&version)
+                    style::dim(&version),
+                    style::dim(&protocol.to_string()),
                 );
             }
-            return Ok(Probe::Running { pid, version });
+            return Ok(Probe::Running {
+                pid,
+                version,
+                protocol,
+            });
         }
-        Probe::Incompatible => return Err(incompatible_error()),
+        Probe::Incompatible { reason } => {
+            return Err(anyhow!(
+                "{} — {}",
+                "the running strangetimer-daemon is incompatible with this CLI",
+                reason
+            ))
+        }
         Probe::NotRunning => {}
     }
 
@@ -203,7 +251,11 @@ fn wait_for_running() -> Result<Probe> {
     loop {
         match probe() {
             probe @ Probe::Running { .. } => return Ok(probe),
-            Probe::Incompatible => return Err(incompatible_error()),
+            Probe::Incompatible { reason } => {
+                return Err(anyhow!(
+                    "the running strangetimer-daemon is incompatible with this CLI — {reason}"
+                ))
+            }
             Probe::NotRunning => {
                 if Instant::now() >= deadline {
                     return Err(anyhow!("did not start listening within {:?}", WAIT_TIMEOUT));
@@ -237,9 +289,9 @@ fn stop() -> Result<()> {
             println!("{}", style::dim("strangetimer-daemon is not running."));
             return Ok(());
         }
-        Probe::Incompatible => {
+        Probe::Incompatible { reason } => {
             eprintln!(
-                "warning: the listener on {} cannot answer IPC; forcing a stop",
+                "warning: the listener on {} cannot answer IPC ({reason}); forcing a stop",
                 socket_name()
             );
             force_kill()?;
@@ -321,21 +373,35 @@ pub fn probe() -> Probe {
         Err(_) => return Probe::NotRunning,
     };
     if strangetimer_core::ipc::write_message(&mut conn, &ClientMessage::Ping).is_err() {
-        return Probe::Incompatible;
+        return Probe::Incompatible {
+            reason: "the listener cannot answer IPC (is an older daemon running?)".to_string(),
+        };
     }
     match strangetimer_core::ipc::read_message::<ServerMessage>(&mut conn) {
-        Ok(ServerMessage::Status { pid, version }) => Probe::Running { pid, version },
-        _ => Probe::Incompatible,
+        Ok(ServerMessage::Status {
+            pid,
+            version,
+            protocol,
+        }) => {
+            if protocol != strangetimer_core::ipc::IPC_PROTOCOL_VERSION {
+                return Probe::Incompatible {
+                    reason: format!(
+                        "the running daemon speaks IPC protocol {protocol}, this CLI needs {} — \
+                         run `strangetimer daemon restart` to load the matching daemon",
+                        strangetimer_core::ipc::IPC_PROTOCOL_VERSION
+                    ),
+                };
+            }
+            Probe::Running {
+                pid,
+                version,
+                protocol,
+            }
+        }
+        _ => Probe::Incompatible {
+            reason: "the listener cannot answer IPC (is an older daemon running?)".to_string(),
+        },
     }
-}
-
-fn incompatible_error() -> anyhow::Error {
-    anyhow!(
-        "the listener on {} is not a compatible strangetimer-daemon — an older \
-         version is probably running. Stop it with `strangetimer daemon stop` \
-         (it will force-kill if IPC fails) or kill it manually.",
-        socket_name()
-    )
 }
 
 /// Locate the daemon binary: `STRANGETIMER_DAEMON` override, same directory

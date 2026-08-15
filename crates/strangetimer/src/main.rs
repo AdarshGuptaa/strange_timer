@@ -75,6 +75,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::InstallCompletions { shell } => {
             commands::install_completions::install_completions(shell)
         }
+        Command::Doctor => commands::doctor::doctor(),
         Command::Watch => commands::watch::watch(),
         Command::View {
             name,
