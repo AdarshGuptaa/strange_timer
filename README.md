@@ -393,6 +393,14 @@ transparent daemon auto-starting.
   [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for build/test guidance, and
   [`docs/BUZZER_EXAMPLES.md`](docs/BUZZER_EXAMPLES.md) for buzzer examples.
 
+## Future Scope/ Goal:
+Moving from a human-friendly timer application to a AI Agent activity scheduler that is deterministic in nature. Some abilities planned for the future:
+- A GUI for creating schedules spanning from seconds, minutes, days, weeks, months and years.
+- Schedules optionally producible by agents on demand
+- Scheduled Inter session/ Inter agent communication that is not based on "reaction" like traditional agentic workflows are.
+- Persistence handling over reboots: 2 types: Where time elapses and reminders are skipped or Where the schedule is paused until reboot
+- Inter-network scheduling where agents/processes are able to deterministically communicate over the web.
+
 ## License
 
 MIT
