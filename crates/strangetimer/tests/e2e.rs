@@ -9,6 +9,22 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// Open the daemon log in append mode.
+///
+/// The daemon's own logger appends timestamped lines to this file, and the
+/// tests additionally redirect the daemon's stdout/stderr into it. A plain
+/// `File::create` fd is positioned at offset 0, so the stderr copies (ALSA
+/// errors, warnings) overwrite earlier logged lines from the start of the
+/// file — erasing the `BUZZ` / `missed alarm` lines the tests assert on
+/// when the runner has no audio device. Appending keeps everything.
+fn open_log_append(path: &std::path::Path) -> std::fs::File {
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap()
+}
+
 /// Unique per-test data directory + socket, so tests can run in parallel.
 #[derive(Clone)]
 struct TestEnv {
@@ -56,6 +72,7 @@ impl DaemonGuard {
     /// a test wants to control the persisted state itself.
     fn start_no_seed(env: TestEnv, extra_env: &[(&str, &str)]) -> DaemonGuard {
         let log = env.dir.join("daemon.log");
+        let log_file = open_log_append(&log);
         let mut cmd = Command::new(daemon_binary());
         cmd.env("STRANGETIMER_DATA_DIR", &env.dir)
             .env("STRANGETIMER_SOCKET", &env.socket);
@@ -63,8 +80,8 @@ impl DaemonGuard {
             cmd.env(k, v);
         }
         let child = cmd
-            .stdout(Stdio::from(fs::File::create(&log).unwrap()))
-            .stderr(Stdio::from(fs::File::create(&log).unwrap()))
+            .stdout(Stdio::from(log_file.try_clone().unwrap()))
+            .stderr(Stdio::from(log_file))
             .spawn()
             .expect("failed to spawn strangetimer-daemon");
         let guard = DaemonGuard { child, env, log };
@@ -89,6 +106,7 @@ impl DaemonGuard {
     fn start_with(env: TestEnv, extra_env: &[(&str, &str)]) -> DaemonGuard {
         env.pre_seed_registered();
         let log = env.dir.join("daemon.log");
+        let log_file = open_log_append(&log);
         let mut cmd = Command::new(daemon_binary());
         cmd.env("STRANGETIMER_DATA_DIR", &env.dir)
             .env("STRANGETIMER_SOCKET", &env.socket);
@@ -96,8 +114,8 @@ impl DaemonGuard {
             cmd.env(k, v);
         }
         let child = cmd
-            .stdout(Stdio::from(fs::File::create(&log).unwrap()))
-            .stderr(Stdio::from(fs::File::create(&log).unwrap()))
+            .stdout(Stdio::from(log_file.try_clone().unwrap()))
+            .stderr(Stdio::from(log_file))
             .spawn()
             .expect("failed to spawn strangetimer-daemon");
 
@@ -359,11 +377,12 @@ fn restart_fires_missed_alarm() {
 
     // Restart after the alarm time has passed.
     std::thread::sleep(Duration::from_secs(4));
+    let log_file = open_log_append(&guard.log);
     guard.child = Command::new(daemon_binary())
         .env("STRANGETIMER_DATA_DIR", &guard.env.dir)
         .env("STRANGETIMER_SOCKET", &guard.env.socket)
-        .stdout(Stdio::from(fs::File::create(&guard.log).unwrap()))
-        .stderr(Stdio::from(fs::File::create(&guard.log).unwrap()))
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
         .spawn()
         .expect("failed to respawn strangetimer-daemon");
 
@@ -903,12 +922,13 @@ fn recovery_catches_up_multiple_missed_repetitions() {
     std::thread::sleep(Duration::from_secs(5));
 
     // Restart with the recording opener.
+    let log_file = open_log_append(&log);
     guard.child = Command::new(daemon_binary())
         .env("STRANGETIMER_DATA_DIR", &env2.dir)
         .env("STRANGETIMER_SOCKET", &env2.socket)
         .env("STRANGETIMER_TEST_OPENER", &opener)
-        .stdout(Stdio::from(fs::File::create(&log).unwrap()))
-        .stderr(Stdio::from(fs::File::create(&log).unwrap()))
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
         .spawn()
         .expect("failed to respawn strangetimer-daemon");
     let deadline = Instant::now() + Duration::from_secs(15);

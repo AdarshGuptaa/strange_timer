@@ -32,6 +32,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev
 
+      # Headless runners have no sound card: ALSA errors would spew into
+      # the daemon log (interleaving with the lines tests assert on) and
+      # audio buzzers would fail. A null default PCM lets the daemon
+      # "play" audio silently, like a real desktop.
+      - name: Configure a null ALSA device
+        run: |
+          cat > "$HOME/.asoundrc" <<'EOF'
+          pcm.!default { type null }
+          ctl.!default { type null }
+          EOF
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -55,10 +66,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install help2man
+      - name: Install Linux native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y help2man
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev help2man
 
       - name: Build debug CLI
         run: cargo build -p strangetimer --locked
