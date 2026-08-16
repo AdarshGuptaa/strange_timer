@@ -50,7 +50,14 @@ if ($Uninstall) {
 
 if (-not $Version) {
     Say "Resolving the latest release..."
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ "User-Agent" = "strangetimer-installer" }
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ "User-Agent" = "strangetimer-installer" }
+    } catch {
+        # /releases/latest ignores prereleases; fall back to the most
+        # recent release (which may be a prerelease) so a beta-only repo
+        # still installs.
+        $release = (Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=1" -Headers @{ "User-Agent" = "strangetimer-installer" })[0]
+    }
     $Version = $release.tag_name
 }
 Say "Installing StrangeTimer $Version (windows-$arch) into $Root"

@@ -220,11 +220,11 @@ jobs:
       - name: Create GitHub release and upload assets
         uses: softprops/action-gh-release@v3
         with:
-          # Pre-release tags (e.g. v1.0.0-beta.1) are marked prerelease;
-          # stable tags are NOT, so they are picked up by the installers'
-          # releases/latest resolution. Prerelease tags are never "latest",
-          # so installers must pass --version / -Version explicitly for them.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Releases are deliberately NOT marked prerelease: GitHub's
+          # /releases/latest only resolves stable releases, and both the
+          # installers and the README one-liner
+          # (releases/latest/download/install.sh) depend on it. While this
+          # project is pre-1.0, the newest v* tag IS its "latest" release.
           files: |
             release-assets/*
             scripts/install.sh

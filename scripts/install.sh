@@ -37,8 +37,9 @@ done
 
 say() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 # curl flags: HTTPS-only by default; override with CURL_FLAGS for local
-# testing against an http:// mirror.
-CURL_FLAGS="${CURL_FLAGS:---proto '=https' --tlsv1.2}"
+# testing against an http:// mirror. (No embedded quotes: CURL_FLAGS is
+# word-split, so `'=https'` would reach curl as a literal quoted value.)
+CURL_FLAGS="${CURL_FLAGS:---proto =https --tlsv1.2}"
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- platform detection -----------------------------------------------------
@@ -90,8 +91,15 @@ fi
 if [ -z "$VERSION" ]; then
     say "Resolving the latest release…"
     VERSION="$(curl $CURL_FLAGS -fsSL \
-        "https://api.github.com/repos/$REPO/releases/latest" \
+        "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
         | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+    # /releases/latest ignores prereleases; fall back to the most recent
+    # release (which may be a prerelease) so a beta-only repo still installs.
+    if [ -z "$VERSION" ]; then
+        VERSION="$(curl $CURL_FLAGS -fsSL \
+            "https://api.github.com/repos/$REPO/releases?per_page=1" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+    fi
     [ -n "$VERSION" ] || die "could not determine the latest version"
 fi
 say "Installing StrangeTimer $VERSION ($PLATFORM-$ARCH) into $INSTALL_ROOT"
