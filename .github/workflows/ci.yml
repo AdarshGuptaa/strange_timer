@@ -1,0 +1,46 @@
+name: CI
+
+# Runs the same test suite as the release workflow on every push and pull
+# request, so regressions are caught before a release tag is cut. The
+# release workflow only triggers on v* tags.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # rodio needs ALSA headers; reqwest needs OpenSSL. Without these
+      # the alsa-sys build script fails with "Package alsa was not found".
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build debug binaries for e2e tests
+        run: cargo build --workspace --locked
+
+      # e2e tests mutate process-global environment variables (the
+      # STRANGETIMER_TEST_* / XDG_SESSION_TYPE seams), so they must not run
+      # in parallel within the test binary.
+      - name: Run tests
+        run: cargo test --workspace --locked -- --test-threads=1
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
