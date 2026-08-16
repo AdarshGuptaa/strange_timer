@@ -87,9 +87,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: man-page
-          # Upload the directory, not the file: a plain file path is
-          # flattened to its basename at the artifact root, which would
-          # land the page at dist/strangetimer.1 instead of dist/man/.
+          # Note: upload-artifact flattens the page to the artifact root
+          # (strangetimer.1); the build job re-roots it into dist/man/.
           path: man
           if-no-files-found: error
 
@@ -126,7 +125,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: man-page
-          path: dist
+          path: man-page
 
       - name: Build release binaries
         run: cargo build --release --workspace --locked
@@ -144,6 +143,9 @@ jobs:
           fi
           ARCHIVE_NAME="strangetimer-${{ env.VERSION }}-${{ matrix.label }}.${{ matrix.archive }}"
           mkdir -p dist/completions dist/man
+          # The man-page artifact arrives flattened at man-page/strangetimer.1;
+          # re-root it into dist/man/ so every archive ships man/strangetimer.1.
+          cp man-page/strangetimer.1 dist/man/
           cp ./target/release/strangetimer$EXE dist/
           cp ./target/release/strangetimer-daemon$EXE dist/
           cp -r ./crates/strangetimer-daemon/assets dist/
