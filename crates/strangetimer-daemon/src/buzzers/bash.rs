@@ -11,7 +11,7 @@ pub fn fire_bash(path: &Path) {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", path]);
+        c.arg("/C").arg(path);
         c
     };
 
