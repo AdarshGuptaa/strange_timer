@@ -102,9 +102,6 @@ jobs:
           - label: linux-x86_64
             os: ubuntu-latest
             archive: tar.gz
-          - label: macos-x86_64
-            os: macos-13
-            archive: tar.gz
           - label: macos-aarch64
             os: macos-14
             archive: tar.gz
@@ -280,7 +277,6 @@ jobs:
           cat assets.txt
           for expected in \
             "strangetimer-${{ env.VERSION }}-linux-x86_64.tar.gz" \
-            "strangetimer-${{ env.VERSION }}-macos-x86_64.tar.gz" \
             "strangetimer-${{ env.VERSION }}-macos-aarch64.tar.gz" \
             "strangetimer-${{ env.VERSION }}-windows-x86_64.zip" \
             "checksums.txt" \

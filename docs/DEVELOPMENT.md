@@ -372,7 +372,7 @@ and points the user at `strangetimer daemon restart`.
 
 Cutting a release is tag-driven: `.github/workflows/release.yml` runs the
 test suite, then builds and packages release archives for linux-x86_64,
-macos-x86_64, macos-aarch64 and windows-x86_64 and uploads them to the
+macos-aarch64 and windows-x86_64 and uploads them to the
 GitHub release for the tag.
 
 ```sh

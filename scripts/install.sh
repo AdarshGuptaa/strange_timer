@@ -57,7 +57,8 @@ case "$uname_m" in
 esac
 
 if [ "$PLATFORM" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
-    : # macos-x86_64 is fine
+    die "macOS x86_64 builds are no longer published (GitHub Actions retired \
+the Intel macOS runners) — use an Apple Silicon machine or the macos-aarch64 archive"
 fi
 
 BIN_DIR="$INSTALL_ROOT/bin"
