@@ -87,7 +87,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: man-page
-          path: man/strangetimer.1
+          # Upload the directory, not the file: a plain file path is
+          # flattened to its basename at the artifact root, which would
+          # land the page at dist/strangetimer.1 instead of dist/man/.
+          path: man
           if-no-files-found: error
 
   build:
@@ -246,10 +249,10 @@ jobs:
           tar -xzf "$ARCHIVE" -C smoke/x
           cd smoke/x
           ./strangetimer --version | grep -Fq "${VERSION#v}"
-          test -x ./strangetimer-daemon
-          test -f ./assets/default.mp4
-          test -f ./assets/chime.wav
-          test -s ./man/strangetimer.1
+          test -x ./strangetimer-daemon || { echo "daemon binary missing" >&2; exit 1; }
+          test -f ./assets/default.mp4 || { echo "assets/default.mp4 missing" >&2; exit 1; }
+          test -f ./assets/chime.wav || { echo "assets/chime.wav missing" >&2; exit 1; }
+          test -s ./man/strangetimer.1 || { echo "man/strangetimer.1 missing or empty" >&2; exit 1; }
           ./strangetimer completions bash | grep -q COMPLETE=
           ./strangetimer completions fish | grep -q "strangetimer"
           ./strangetimer install-completions --shell bash
