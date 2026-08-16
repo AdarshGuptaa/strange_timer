@@ -152,6 +152,8 @@ mod tests {
                 interrupt_pending: None,
                 pending_interrupts: Vec::new(),
                 pending_fires: Vec::new(),
+                session_env: Default::default(),
+                close_windows_confirmed: false,
             },
         ))
     }

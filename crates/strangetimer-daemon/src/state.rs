@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use chrono::{Duration, Local};
 use strangetimer_core::model::{
     Buzzer, BuzzerAction, BuzzerDetail, BuzzerEvent, BuzzerInfo, DaemonState, FireEvent,
-    RepeatMode, Timer, TimerRun, TimerStatus,
+    RepeatMode, SessionEnv, Timer, TimerRun, TimerStatus,
 };
 use strangetimer_core::persistence::{save_buzzers, save_state, save_timers};
 use tokio::sync::Mutex;
@@ -21,15 +21,17 @@ pub struct AppState {
     /// Synchronous mirror of `DaemonState::pending_interrupts`, readable
     /// from background threads (the looping audio playback) without async.
     pending: std::sync::Mutex<Vec<String>>,
+    /// Latest known interactive-session environment, refreshed from every
+    /// CLI request (protocol v2). Read from background threads when a buzzer
+    /// launches a GUI-side action, so a thread-local `Mutex` avoids the
+    /// state lock in the dispatch path.
+    session_env: std::sync::Mutex<SessionEnv>,
 }
 
 pub struct StateInner {
     pub timers: Vec<Timer>,
     pub buzzers: Vec<Buzzer>,
     pub state: DaemonState,
-    /// Opt-in flag for the destructive `close_windows` buzzer. Set via the
-    /// `strangetimer confirm-destructive` command; not persisted.
-    pub close_windows_confirmed: bool,
     /// Ringing-event log for `strangetimer watch` (memory-only, bounded).
     pub events: VecDeque<BuzzerEvent>,
     pub next_event_id: u64,
@@ -40,22 +42,53 @@ pub struct StateInner {
 
 impl AppState {
     pub fn new(timers: Vec<Timer>, buzzers: Vec<Buzzer>, state: DaemonState) -> Self {
+        let session_env = state.session_env.clone();
         Self {
             inner: Mutex::new(StateInner {
                 timers,
                 buzzers,
                 state,
-                close_windows_confirmed: false,
                 events: VecDeque::new(),
                 next_event_id: 0,
                 media_cache: HashMap::new(),
             }),
             pending: std::sync::Mutex::new(Vec::new()),
+            session_env: std::sync::Mutex::new(session_env),
         }
     }
 
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, StateInner> {
         self.inner.lock().await
+    }
+
+    // --- Interactive-session environment (protocol v2) ---
+
+    /// Refresh the launch environment from a CLI request. A fully empty
+    /// snapshot (headless sender) is ignored so it never overwrites the
+    /// last-known session. The freshest copy is persisted with the state;
+    /// unchanged snapshots skip the disk write.
+    pub async fn set_session_env(&self, env: SessionEnv) {
+        if env.is_empty() {
+            return;
+        }
+        {
+            let mut current = self.session_env.lock().expect("session env lock");
+            if *current == env {
+                return;
+            }
+            *current = env.clone();
+        }
+        let mut inner = self.inner.lock().await;
+        inner.state.session_env = env;
+        if let Err(e) = save_state(&inner.state) {
+            warn!("failed to persist session env: {e:#}");
+        }
+    }
+
+    /// Snapshot of the latest known session environment for launching
+    /// GUI-side buzzer actions. Synchronous: called from fire tasks.
+    pub fn session_env_sync(&self) -> SessionEnv {
+        self.session_env.lock().expect("session env lock").clone()
     }
 
     // --- Timers ---
@@ -435,15 +468,30 @@ impl AppState {
     }
 
     // --- Destructive-buzzer opt-in ---
+    //
+    // Persisted in `DaemonState::close_windows_confirmed` so the opt-in
+    // survives daemon restarts (it used to reset on every restart, which
+    // made destructive buzzers appear to stop working "randomly").
 
     pub async fn is_close_windows_confirmed(&self) -> bool {
         let inner = self.inner.lock().await;
-        inner.close_windows_confirmed
+        inner.state.close_windows_confirmed
     }
 
     pub async fn set_close_windows_confirmed(&self) {
         let mut inner = self.inner.lock().await;
-        inner.close_windows_confirmed = true;
+        inner.state.close_windows_confirmed = true;
+        if let Err(e) = save_state(&inner.state) {
+            warn!("failed to persist close-windows opt-in: {e:#}");
+        }
+    }
+
+    /// Clear the destructive-buzzer opt-in (`strangetimer revoke-destructive`).
+    pub async fn revoke_close_windows_confirmed(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.state.close_windows_confirmed = false;
+        save_state(&inner.state)?;
+        Ok(())
     }
 
     // --- Ringing events (`strangetimer watch`) ---
@@ -997,6 +1045,45 @@ mod tests {
         assert!(!s.is_close_windows_confirmed().await);
         s.set_close_windows_confirmed().await;
         assert!(s.is_close_windows_confirmed().await);
+        s.revoke_close_windows_confirmed().await.unwrap();
+        assert!(!s.is_close_windows_confirmed().await);
+    }
+
+    #[tokio::test]
+    async fn close_windows_confirmation_survives_state_reload() {
+        // The opt-in is persisted in DaemonState, so a daemon restart no
+        // longer silently re-blocks destructive buzzers.
+        let s = fresh_state();
+        s.set_close_windows_confirmed().await;
+        let persisted = s.get_state().await;
+
+        let s2 = AppState::new(Vec::new(), Vec::new(), persisted);
+        assert!(s2.is_close_windows_confirmed().await);
+    }
+
+    #[tokio::test]
+    async fn session_env_is_persisted_and_empty_is_ignored() {
+        let s = fresh_state();
+        let mut env = SessionEnv {
+            display: Some(":9".to_string()),
+            ..Default::default()
+        };
+        s.set_session_env(env.clone()).await;
+        assert_eq!(s.session_env_sync(), env);
+        assert_eq!(s.get_state().await.session_env, env);
+
+        // A headless sender (empty snapshot) must not clobber the last one.
+        s.set_session_env(SessionEnv::default()).await;
+        assert_eq!(s.session_env_sync(), env);
+
+        // A reload from disk keeps the persisted snapshot.
+        let s2 = AppState::new(Vec::new(), Vec::new(), s.get_state().await);
+        assert_eq!(s2.session_env_sync(), env);
+
+        // A fresher non-empty snapshot replaces it.
+        env.display = Some(":10".to_string());
+        s.set_session_env(env.clone()).await;
+        assert_eq!(s.session_env_sync(), env);
     }
 
     #[tokio::test]

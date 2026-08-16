@@ -83,7 +83,7 @@ it); Windows: `install.ps1 -Uninstall`.
    your `PATH`:
 
    ```sh
-   tar -xzf strangetimer-v1.0.0-beta.1-linux-x86_64.tar.gz
+   tar -xzf strangetimer-v1.0.1-beta.1-linux-x86_64.tar.gz
    cp strangetimer strangetimer-daemon ~/.local/bin/
    cp -r assets ~/.local/share/strangetimer-assets/   # or beside the daemon
    ```
@@ -225,13 +225,13 @@ Closes a single application by process name (`firefox`, `chrome`, …).
 Because it is destructive, it is gated behind an explicit opt-in:
 
 ```sh
-strangetimer confirm-destructive     # once per daemon session
+strangetimer confirm-destructive
 strangetimer create buzzer quitBrowser --close-app firefox
 ```
 
-When it fires: the named application quits. The opt-in resets on every
-daemon restart, so a destructive buzzer can never silently survive a
-reboot.
+When it fires: the named application quits. The opt-in is persisted, so it
+survives daemon restarts and reboots; revoke it at any time with
+`strangetimer revoke-destructive`.
 
 ### Focus a window — `--focus-window <name>`
 
@@ -317,7 +317,7 @@ Any other command auto-starts the daemon if it isn't running
 | `strangetimer delete buzzer <name> --cascade [--yes]` | Also delete every timer using the buzzer, after confirmation. |
 | `strangetimer view buzzers` | Buzzer library table with action targets, media durations, and timer/live-run reference counts. |
 | `strangetimer view buzzer <name>` | Detailed view of one buzzer (every action's target + duration, referencing timers). |
-| `strangetimer confirm-destructive` | Opt in to `close_windows` and `close_app` buzzers. |
+| `strangetimer confirm-destructive` | Opt in to `close_windows` and `close_app` buzzers (persisted; `revoke-destructive` undoes it). |
 | `strangetimer examples [--install]` | List example buzzers for every action type, or install the file-free ones. |
 
 The built-in buzzers `default_audio`, `default_video` and `close_windows`
@@ -378,10 +378,17 @@ transparent daemon auto-starting.
   to bind the IPC socket, and `strangetimer daemon stop` is the graceful
   way to hand the socket over.
 - The **CLI** is stateless: it sends a length-prefixed JSON message over a
-  Unix socket / named pipe and prints the reply.
+  Unix socket / named pipe and prints the reply. Every request also carries
+  the CLI's current session environment (`DISPLAY`, `XAUTHORITY`,
+  `DBUS_SESSION_BUS_ADDRESS`, …), so the daemon's GUI-side buzzer actions
+  (video, URL, applications) always run against the session you are
+  actually in — terminal switches, new logins and reboots no longer leave
+  them pointing at a stale display. Failed launches are reported through
+  `strangetimer watch` instead of vanishing into the log.
 - On startup the daemon **recovers**: runs that were active during downtime
-  fire their missed alarms immediately, and scheduled runs whose time passed
-  start at once.
+  fire their missed alarms immediately (persisted to the fire outbox first,
+  so a crash during recovery can't lose an alarm), and scheduled runs whose
+  time passed start at once.
 - See [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md) for the full design,
   [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for build/test guidance, and
   [`docs/BUZZER_EXAMPLES.md`](docs/BUZZER_EXAMPLES.md) for buzzer examples.

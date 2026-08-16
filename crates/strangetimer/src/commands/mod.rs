@@ -70,7 +70,12 @@ fn exchange_on(
     mut conn: interprocess::local_socket::Stream,
     msg: &ClientMessage,
 ) -> Result<ServerMessage> {
-    strangetimer_core::ipc::write_message(&mut conn, msg).context("failed to write IPC message")?;
+    // The envelope carries the CLI's current session environment (protocol
+    // v2) so the daemon's GUI buzzer actions always target the session the
+    // user is actually in — see `ClientRequest`.
+    let request = strangetimer_core::ipc::ClientRequest::new(msg.clone());
+    strangetimer_core::ipc::write_message(&mut conn, &request)
+        .context("failed to write IPC message")?;
     let response = strangetimer_core::ipc::read_message::<ServerMessage>(&mut conn)
         .context("failed to read IPC response")?;
     Ok(response)

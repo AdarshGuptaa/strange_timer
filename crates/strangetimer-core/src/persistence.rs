@@ -216,6 +216,8 @@ mod tests {
             interrupt_pending: None,
             pending_interrupts: vec![],
             pending_fires: vec![],
+            session_env: Default::default(),
+            close_windows_confirmed: false,
         };
         save_state(&state).unwrap();
         let loaded = load_state().unwrap();

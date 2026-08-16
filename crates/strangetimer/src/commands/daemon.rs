@@ -372,7 +372,12 @@ pub fn probe() -> Probe {
         Ok(c) => c,
         Err(_) => return Probe::NotRunning,
     };
-    if strangetimer_core::ipc::write_message(&mut conn, &ClientMessage::Ping).is_err() {
+    if strangetimer_core::ipc::write_message(
+        &mut conn,
+        &strangetimer_core::ipc::ClientRequest::new(ClientMessage::Ping),
+    )
+    .is_err()
+    {
         return Probe::Incompatible {
             reason: "the listener cannot answer IPC (is an older daemon running?)".to_string(),
         };
@@ -516,38 +521,81 @@ fn try_systemd_start(daemon: &Path) -> Result<Option<Probe>> {
     }
 }
 
-/// Keep the unit's ExecStart pointing at the current daemon binary. Dev
+/// Keep the unit's ExecStart pointing at the current daemon binary and its
+/// `Environment=` lines matching the *current* interactive session. Dev
 /// builds move between target/debug and target/release; a stale path makes
-/// autostart start a binary that no longer exists.
+/// autostart start a binary that no longer exists. Stale `Environment=`
+/// lines (DISPLAY/DBus pointers captured at registration time) are exactly
+/// why GUI-side buzzer actions used to break after a reboot or a new login.
+///
+/// A fully headless CLI (no display vars) skips the environment refresh so
+/// it never wipes the session lines out of the unit.
 #[cfg(target_os = "linux")]
 fn heal_systemd_unit(unit: &Path, daemon: &Path) -> Result<()> {
     let content =
         fs::read_to_string(unit).with_context(|| format!("failed to read {}", unit.display()))?;
     let want = format!("ExecStart={}", daemon.display());
-    if content.lines().any(|l| l == want) {
+    let env_lines = session_env_lines();
+    let existing: Vec<&str> = content.lines().collect();
+
+    let exec_ok = existing.iter().any(|l| *l == want);
+    let env_ok = env_lines.is_empty() || env_lines.iter().all(|e| existing.contains(&e.as_str()));
+    if exec_ok && env_ok {
         return Ok(());
     }
 
-    let healed: String = content
-        .lines()
-        .map(|l| {
-            if l.starts_with("ExecStart=") {
-                want.as_str()
-            } else {
-                l
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    fs::write(unit, healed).with_context(|| format!("failed to heal {}", unit.display()))?;
+    // Line surgery: replace the ExecStart line, drop stale Environment
+    // lines, and re-insert the current session's env right after ExecStart.
+    let mut out: Vec<String> = Vec::with_capacity(existing.len() + env_lines.len());
+    let mut inserted = false;
+    for l in existing {
+        if l.starts_with("ExecStart=") {
+            out.push(want.clone());
+            out.extend(env_lines.iter().cloned());
+            inserted = true;
+        } else if !l.starts_with("Environment=") {
+            out.push(l.to_string());
+        }
+    }
+    if !inserted {
+        out.extend(env_lines);
+    }
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    fs::write(unit, text).with_context(|| format!("failed to heal {}", unit.display()))?;
     run_quiet("systemctl", &["--user", "daemon-reload"]);
     eprintln!(
-        "strangetimer: healed systemd unit {} to point at {}",
-        unit.display(),
-        daemon.display()
+        "strangetimer: healed systemd unit {} (ExecStart + session env)",
+        unit.display()
     );
     Ok(())
+}
+
+/// The `Environment=` lines for the current interactive session, in the
+/// same order `register_autostart` writes them. Empty when the CLI is
+/// headless (no display variables at all).
+#[cfg(target_os = "linux")]
+fn session_env_lines() -> Vec<String> {
+    let env = strangetimer_core::model::SessionEnv::from_process_env();
+    let mut lines = Vec::new();
+    for (key, value) in [
+        ("DISPLAY", env.display.as_deref()),
+        ("WAYLAND_DISPLAY", env.wayland_display.as_deref()),
+        ("XAUTHORITY", env.xauthority.as_deref()),
+        (
+            "DBUS_SESSION_BUS_ADDRESS",
+            env.dbus_session_bus_address.as_deref(),
+        ),
+        ("XDG_RUNTIME_DIR", env.xdg_runtime_dir.as_deref()),
+        ("PATH", env.path.as_deref()),
+    ] {
+        if let Some(v) = value {
+            lines.push(format!("Environment={key}={v}"));
+        }
+    }
+    lines
 }
 
 #[cfg(target_os = "macos")]
@@ -614,5 +662,82 @@ fn try_schtasks_start() -> Result<Option<Probe>> {
         Err(e) => Err(anyhow!(
             "{e:#} — scheduled task started but the daemon did not come up"
         )),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// The unit heal must replace a stale ExecStart, drop stale
+    /// Environment lines, re-insert the current session's env, and be
+    /// idempotent (a second heal is a no-op).
+    #[test]
+    fn heal_systemd_unit_refreshes_execstart_and_env() {
+        let dir = std::env::temp_dir().join(format!("st-heal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let unit = dir.join("strangetimer.service");
+        let daemon = dir.join("strangetimer-daemon");
+
+        fs::write(
+            &unit,
+            "[Unit]\n\
+             Description=StrangeTimer Daemon\n\
+             [Service]\n\
+             ExecStart=/old/bin/strangetimer-daemon\n\
+             Restart=on-failure\n\
+             Environment=DISPLAY=:0\n\
+             Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/old/bus\n\
+             [Install]\n\
+             WantedBy=default.target\n",
+        )
+        .unwrap();
+
+        // Simulate a fresh interactive session for this test process.
+        let old_display = std::env::var("DISPLAY").ok();
+        let old_dbus = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+        std::env::set_var("DISPLAY", ":77");
+        std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/fresh-bus");
+        heal_systemd_unit(&unit, &daemon).unwrap();
+
+        let healed = fs::read_to_string(&unit).unwrap();
+        assert!(
+            healed.contains(&format!("ExecStart={}", daemon.display())),
+            "ExecStart not healed:\n{healed}"
+        );
+        assert!(
+            !healed.contains("DISPLAY=:0"),
+            "stale DISPLAY kept:\n{healed}"
+        );
+        assert!(
+            !healed.contains("/old/bus"),
+            "stale DBus address kept:\n{healed}"
+        );
+        assert!(
+            healed.contains("Environment=DISPLAY=:77"),
+            "fresh DISPLAY missing:\n{healed}"
+        );
+        assert!(
+            healed.contains("Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/fresh-bus"),
+            "fresh DBus address missing:\n{healed}"
+        );
+
+        // Idempotent while the session env is unchanged: a second heal is
+        // a no-op.
+        let before = fs::read_to_string(&unit).unwrap();
+        heal_systemd_unit(&unit, &daemon).unwrap();
+        let after = fs::read_to_string(&unit).unwrap();
+        assert_eq!(before, after, "second heal changed the unit");
+
+        // Restore the test process's original env.
+        match old_display {
+            Some(d) => std::env::set_var("DISPLAY", d),
+            None => std::env::remove_var("DISPLAY"),
+        }
+        match old_dbus {
+            Some(d) => std::env::set_var("DBUS_SESSION_BUS_ADDRESS", d),
+            None => std::env::remove_var("DBUS_SESSION_BUS_ADDRESS"),
+        }
     }
 }

@@ -3,12 +3,12 @@ use std::io::{Read, Write};
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::model::{Buzzer, RepeatMode, Timer, TimerRun};
+use crate::model::{Buzzer, RepeatMode, SessionEnv, Timer, TimerRun};
 
 /// Bumped whenever the IPC wire format changes incompatibly. The CLI
 /// refuses to talk to a daemon with a different protocol and tells the
 /// user to restart the daemon.
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// Platform-specific name used when binding / connecting to the daemon's
 /// IPC endpoint.
@@ -97,6 +97,10 @@ pub enum ClientMessage {
     /// Opt-in acknowledgement that the `close_windows` buzzer is allowed to
     /// close all other windows. Guarded by `state.close_windows_confirmed`.
     ConfirmDestructive,
+    /// Revoke the destructive-buzzer opt-in (the mirror of
+    /// `ConfirmDestructive`): close_window/close_app buzzers are blocked
+    /// again until re-confirmed.
+    RevokeDestructive,
     /// Register the OS autostart service (idempotent).
     EnableAutostart,
     /// Disable the OS autostart service (does not delete installed files).
@@ -115,6 +119,28 @@ pub enum ClientMessage {
     GetEvents {
         after_id: Option<u64>,
     },
+}
+
+/// The wire envelope for every CLI→daemon request: the actual command plus
+/// the sender's current interactive-session environment. The daemon
+/// refreshes its launch environment from every request (protocol v2), so
+/// GUI-side buzzer actions (video, URL, focus) always run against the
+/// session the user is actually in — regardless of how the daemon started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRequest {
+    /// Sender's session environment. Empty when the sender runs headless.
+    #[serde(default)]
+    pub env: SessionEnv,
+    pub msg: ClientMessage,
+}
+
+impl ClientRequest {
+    pub fn new(msg: ClientMessage) -> Self {
+        Self {
+            env: SessionEnv::from_process_env(),
+            msg,
+        }
+    }
 }
 
 /// Responses sent from the daemon to the CLI.
@@ -280,5 +306,29 @@ mod tests {
         // First 4 bytes: big-endian length of the JSON payload.
         let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         assert_eq!(len, buf.len() - 4);
+    }
+
+    #[test]
+    fn client_request_roundtrip_with_env() {
+        let mut req = ClientRequest::new(ClientMessage::GetBuzzers);
+        req.env.display = Some(":1".to_string());
+        req.env.xauthority = Some("/tmp/xauth".to_string());
+        let mut buf: Vec<u8> = Vec::new();
+        write_message(&mut buf, &req).unwrap();
+        let decoded: ClientRequest = read_message(&mut buf.as_slice()).unwrap();
+        assert!(matches!(decoded.msg, ClientMessage::GetBuzzers));
+        assert_eq!(decoded.env.display.as_deref(), Some(":1"));
+        assert_eq!(decoded.env.xauthority.as_deref(), Some("/tmp/xauth"));
+    }
+
+    #[test]
+    fn client_request_with_empty_env_still_decodes() {
+        // Protocol v1 senders had no envelope at all; a request produced by
+        // `ClientRequest::new` with a headless sender must decode cleanly.
+        let req = ClientRequest::new(ClientMessage::Ping);
+        let mut buf: Vec<u8> = Vec::new();
+        write_message(&mut buf, &req).unwrap();
+        let decoded: ClientRequest = read_message(&mut buf.as_slice()).unwrap();
+        assert!(matches!(decoded.msg, ClientMessage::Ping));
     }
 }

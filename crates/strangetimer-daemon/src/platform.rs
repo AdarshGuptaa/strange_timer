@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use strangetimer_core::model::SessionEnv;
 
 /// Bring the media player window into focus after a buzzer launches one.
 ///
@@ -15,19 +16,86 @@ pub fn focus_media_window() {
     // Intentionally a no-op for now (see TODO above).
 }
 
-/// Open `target` (a file path or URL) with the OS default handler.
+/// Apply the latest-known interactive-session environment to a command that
+/// is about to launch a GUI-side action (opener, application, script).
+///
+/// The daemon may have been started from a stale terminal or as a system
+/// service whose `DISPLAY`/`XAUTHORITY`/DBus pointers no longer match the
+/// session the user is actually in — that is exactly why video/URL buzzers
+/// used to fail "randomly". Overriding per-spawn with the session snapshot
+/// refreshed from the latest CLI request fixes the divergence.
+pub fn apply_session_env(cmd: &mut std::process::Command, env: &SessionEnv) {
+    if let Some(v) = &env.display {
+        cmd.env("DISPLAY", v);
+    }
+    if let Some(v) = &env.wayland_display {
+        cmd.env("WAYLAND_DISPLAY", v);
+    }
+    if let Some(v) = &env.xauthority {
+        cmd.env("XAUTHORITY", v);
+    }
+    if let Some(v) = &env.xdg_runtime_dir {
+        cmd.env("XDG_RUNTIME_DIR", v);
+    }
+    if let Some(v) = &env.dbus_session_bus_address {
+        cmd.env("DBUS_SESSION_BUS_ADDRESS", v);
+    }
+    if let Some(v) = &env.path {
+        cmd.env("PATH", v);
+    }
+}
+
+/// Open `target` (a file path or URL) with the OS default handler, under
+/// the given session environment. Returns a short error string on failure
+/// (so the caller can surface it as a `BuzzerEvent::outcome`), `None` on
+/// success.
+///
+/// On Linux the launcher is spawned directly with the session env applied
+/// (`gio open` first, falling back to `xdg-open`), so a daemon running as a
+/// system service or from a stale terminal still opens on the session the
+/// user is currently in. The `open` crate is the last-resort fallback.
 ///
 /// Test seam: when `STRANGETIMER_TEST_OPENER` is set, that binary is run
 /// with the target as its single argument instead of the system opener —
 /// tests use this to record/verify opens without launching a GUI.
-pub fn open_target(target: &str) {
+pub fn open_target(target: &str, env: &SessionEnv) -> Option<String> {
     if let Some(override_path) = std::env::var_os("STRANGETIMER_TEST_OPENER") {
-        let _ = Command::new(override_path).arg(target).status();
-        return;
+        let mut cmd = Command::new(override_path);
+        cmd.arg(target);
+        apply_session_env(&mut cmd, env);
+        let status = cmd.status();
+        return match status {
+            Ok(s) if s.success() => None,
+            Ok(s) => Some(format!(
+                "failed to open {target:?}: test opener exited with {s}"
+            )),
+            Err(e) => Some(format!("failed to open {target:?}: test opener: {e}")),
+        };
     }
-    if let Err(e) = open::that(target) {
-        warn!("failed to open {target:?}: {e}");
+    #[cfg(target_os = "linux")]
+    {
+        if launch_with_env("gio", &["open", target], env) {
+            return None;
+        }
+        if launch_with_env("xdg-open", &[target], env) {
+            return None;
+        }
     }
+    // Fallback (any platform): the `open` crate.
+    match open::that(target) {
+        Ok(()) => None,
+        Err(e) => Some(format!("failed to open {target:?}: {e}")),
+    }
+}
+
+/// Spawn `launcher` with `args` under `env`; true when the spawn succeeded
+/// (the child may still exit nonzero — openers are fire-and-forget).
+#[cfg(target_os = "linux")]
+fn launch_with_env(launcher: &str, args: &[&str], env: &SessionEnv) -> bool {
+    let mut cmd = Command::new(launcher);
+    cmd.args(args);
+    apply_session_env(&mut cmd, env);
+    cmd.spawn().is_ok()
 }
 
 /// Resolve an external tool name, honouring a test override:

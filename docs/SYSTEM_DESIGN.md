@@ -808,7 +808,7 @@ and lint with `cargo clippy --workspace --all-targets`.
 | 5 | Fixed `.tmp` names | Unique per-writer temp names | Fixed names race under concurrent writers (found by tests). |
 | 6 | `create timer` accepts duplicate names | Refused | Names are the identity key for every other command. |
 | 7 | View is animated only | Static fallback when stdout is not a TTY | Scriptable/piped output and e2e assertions. |
-| 8 | `close_windows_confirmed` unpersisted | Stays in-memory | Destructive opt-in should not survive a restart. |
+| 8 | `close_windows_confirmed` unpersisted | Persisted in `DaemonState`; `revoke-destructive` clears it | An in-memory-only opt-in silently re-blocked destructive buzzers on every daemon restart — the "randomly stopped working" reports. |
 | 9 | Daemon takeover (Prompt 22 option) | CLI-managed lifecycle only; daemon never steals a live endpoint | Predictable: "which daemon is mine?" has one answer; graceful stop+start is the supported handover. |
 | 10 | `examples --install` installs every example | Only file-free examples installable; path-based ones are docs-only | Audio/app/script paths are machine-specific; a broken default path would be worse than a copy-paste command. |
 | 11 | Ping-only liveness probe (Prompt 22) | Two-step probe: connect (listening) then Ping (compatible) | An old binary can't answer Ping; treating it as "not running" spawned a doomed second daemon ("Address already in use"). |

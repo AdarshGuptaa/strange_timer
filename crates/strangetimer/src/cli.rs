@@ -136,9 +136,18 @@ pub enum Command {
     \n\
       strangetimer confirm-destructive\n\
     \n\
-    Required once per daemon session before any close_windows or close_app\n\
-    buzzer will run. The opt-in resets when the daemon restarts.")]
+    Required before any close_windows or close_app buzzer will run. The\n\
+    opt-in is persisted, so it survives daemon restarts; revoke it with\n\
+    `strangetimer revoke-destructive`.")]
     ConfirmDestructive,
+    /// Revoke the destructive-buzzer opt-in: close_window/close_app buzzers
+    /// are blocked again until `confirm-destructive` is run.
+    #[command(after_help = "Examples:\n\
+    \n\
+      strangetimer revoke-destructive\n\
+    \n\
+    The mirror of `confirm-destructive`; persisted across daemon restarts.")]
+    RevokeDestructive,
     /// Manage the background daemon process.
     #[command(after_help = "Examples:\n\
     \n\

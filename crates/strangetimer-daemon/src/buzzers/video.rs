@@ -1,15 +1,19 @@
 use std::path::{Path, PathBuf};
 
+use strangetimer_core::model::SessionEnv;
+
 /// Open a video file in the OS default player (or the built-in clip when
-/// `path` is `None`). The built-in clip is resolved next to the installed
-/// binary (`<exe_dir>/assets/default.mp4`), falling back to the source-tree
-/// asset for development builds.
-pub fn fire_video(path: Option<&Path>) {
+/// `path` is `None`), launched under `env` — the latest-known interactive
+/// session (see `platform::open_target`). The built-in clip is resolved
+/// next to the installed binary (`<exe_dir>/assets/default.mp4`), falling
+/// back to the source-tree asset for development builds. Returns a short
+/// error string when the opener failed (surfaced as a `BuzzerEvent::outcome`).
+pub fn fire_video(path: Option<&Path>, env: &SessionEnv) -> Option<String> {
     let target = match path {
         Some(p) => p.to_path_buf(),
         None => builtin_video_path(),
     };
-    crate::platform::open_target(&target.to_string_lossy());
+    crate::platform::open_target(&target.to_string_lossy(), env)
 }
 
 /// Resolve the path to the built-in `default.mp4` clip. Packaging installs

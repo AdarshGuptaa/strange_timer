@@ -195,6 +195,13 @@ pub fn confirm_destructive() -> Result<()> {
     Ok(())
 }
 
+/// `strangetimer revoke-destructive`
+pub fn revoke_destructive() -> Result<()> {
+    ensure_ok(send_and_receive(&ClientMessage::RevokeDestructive)?)?;
+    println!("destructive buzzer opt-in revoked.");
+    Ok(())
+}
+
 /// Parse a 24h clock time (`HH:MM`) into today's local date-time. If that
 /// moment has already passed, the schedule rolls over to tomorrow.
 fn parse_schedule_time(s: &str) -> Result<DateTime<Local>> {

@@ -10,7 +10,7 @@ mod state;
 use anyhow::{Context, Result};
 use interprocess::local_socket::traits::tokio::Listener as TokioListener;
 use strangetimer_core::ipc::socket_name;
-use strangetimer_core::ipc::{ClientMessage, ServerMessage};
+use strangetimer_core::ipc::{ClientMessage, ClientRequest, ServerMessage};
 use strangetimer_core::model::{
     Buzzer, BuzzerAction, BuzzerEvent, FireEvent, RepeatMode, TimerStatus,
 };
@@ -176,6 +176,7 @@ async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
 
     let run = state.get_run(timer_name).await;
     let requires_ack = run.as_ref().is_some_and(|r| r.user_interrupt);
+    let mut dispatch_issues: Vec<String> = Vec::new();
     if requires_ack {
         if let Err(e) = state.begin_interrupt(timer_name).await {
             warn!("failed to begin user interrupt for {timer_name:?}: {e:#}");
@@ -183,18 +184,20 @@ async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
         buzzers::dispatch_interrupt(&state, &buzzer.actions, timer_name).await;
     } else {
         for action in &buzzer.actions {
-            buzzers::dispatch(&state, action).await;
+            if let Some(issue) = buzzers::dispatch(&state, action).await {
+                dispatch_issues.push(issue);
+            }
         }
     }
 
     // Announce the ringing so `strangetimer watch` can print it, including
-    // why an action was blocked.
+    // why an action was blocked or failed to launch.
     let types: Vec<String> = buzzer
         .actions
         .iter()
         .map(|a| a.label().to_string())
         .collect();
-    let outcome = {
+    let mut outcome = {
         let confirmed = state.is_close_windows_confirmed().await;
         let has_legacy = buzzer
             .actions
@@ -221,6 +224,11 @@ async fn fire_buzzer(event: &FireEvent, state: Arc<AppState>) {
             None
         }
     };
+    // A launch failure (e.g. the opener could not reach the session's
+    // display) must not vanish into the log: surface it to `watch`.
+    if outcome.is_none() && !dispatch_issues.is_empty() {
+        outcome = Some(dispatch_issues.join("; "));
+    }
     state
         .push_event(BuzzerEvent {
             id: 0, // assigned by the daemon
@@ -326,11 +334,15 @@ async fn recover_runs(state: Arc<AppState>, buzzer_tx: &mpsc::Sender<FireEvent>)
     }
 
     // Fire missed alarms immediately — dispatch happens in the fire task.
+    // Persist each event to the durable outbox first (mirroring the
+    // scheduler path), so a crash between this send and the fire task's
+    // dispatch replays the alarm on the next boot instead of losing it.
     for event in missed {
         info!(
             "firing missed alarm for {:?} ({:?}) from downtime",
             event.buzzer_name, event.timer_name
         );
+        state.add_pending_fire(event.clone()).await;
         if let Err(e) = buzzer_tx.send(event).await {
             warn!("recovery buzzer channel error: {e}");
             break;
@@ -405,17 +417,25 @@ async fn accept_loop(
     }
 }
 
-/// Handle a single client connection: read one `ClientMessage`, apply it to
-/// `AppState`, and reply with the matching `ServerMessage`.
+/// Handle a single client connection: read one `ClientRequest` (the wire
+/// envelope carrying the sender's session environment plus the command),
+/// apply it to `AppState`, and reply with the matching `ServerMessage`.
 async fn handle_connection(
     mut conn: interprocess::local_socket::tokio::Stream,
     app_state: Arc<AppState>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let msg: ClientMessage = read_message_async(&mut conn)
+    let request: ClientRequest = read_message_async(&mut conn)
         .await
-        .context("failed to read ClientMessage")?;
+        .context("failed to read ClientRequest")?;
 
+    // Refresh the launch environment from the sender's current session so
+    // GUI-side buzzer actions (video, URL, focus) never run against a stale
+    // display/session. Done before dispatch; ignored when the sender is
+    // headless (empty snapshot).
+    app_state.set_session_env(request.env).await;
+
+    let msg = request.msg;
     debug!("received ClientMessage::{}", variant_name(&msg));
 
     // Shutdown is special: it is answered before the normal handler so the
@@ -532,6 +552,13 @@ async fn handle_message(msg: ClientMessage, state: Arc<AppState>) -> ServerMessa
             state.set_close_windows_confirmed().await;
             ServerMessage::Ok
         }
+        ClientMessage::RevokeDestructive => match state.revoke_close_windows_confirmed().await {
+            Ok(()) => {
+                info!("destructive-buzzer opt-in revoked");
+                ServerMessage::Ok
+            }
+            Err(e) => ServerMessage::Error(e.to_string()),
+        },
         ClientMessage::EnableAutostart => match platform::register_autostart() {
             Ok(()) => {
                 state
@@ -605,6 +632,7 @@ fn variant_name(msg: &ClientMessage) -> &'static str {
         ClientMessage::GetBuzzerDetail { .. } => "GetBuzzerDetail",
         ClientMessage::DeleteBuzzerCascade { .. } => "DeleteBuzzerCascade",
         ClientMessage::ConfirmDestructive => "ConfirmDestructive",
+        ClientMessage::RevokeDestructive => "RevokeDestructive",
         ClientMessage::EnableAutostart => "EnableAutostart",
         ClientMessage::DisableAutostart => "DisableAutostart",
         ClientMessage::UninstallService => "UninstallService",
@@ -616,7 +644,7 @@ fn variant_name(msg: &ClientMessage) -> &'static str {
 
 /// Async version of `strangetimer_core::ipc::read_message`. Reads a
 /// length-prefixed JSON frame from a tokio async reader.
-async fn read_message_async<R>(reader: &mut R) -> Result<ClientMessage>
+async fn read_message_async<R>(reader: &mut R) -> Result<ClientRequest>
 where
     R: AsyncReadExt + Unpin,
 {
@@ -699,5 +727,81 @@ mod test_util {
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("STRANGETIMER_DATA_DIR", &dir);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strangetimer_core::model::{BuzzerRef, DaemonState, Timer, TimerRun, TimerStatus};
+
+    /// Build a state with one timer whose buzzer fires at `offset_secs`
+    /// and a Running run that started `started_secs_ago` seconds ago.
+    fn overdue_state(offset_secs: i64, started_secs_ago: i64) -> Arc<AppState> {
+        crate::test_util::init();
+        Arc::new(AppState::new(
+            vec![Timer {
+                name: "t".to_string(),
+                buzzers: vec![BuzzerRef {
+                    offset: chrono::Duration::seconds(offset_secs),
+                    buzzer_name: "b".to_string(),
+                }],
+                created_at: chrono::Local::now(),
+            }],
+            vec![Buzzer {
+                name: "b".to_string(),
+                actions: vec![BuzzerAction::DefaultAudio],
+                builtin: false,
+            }],
+            DaemonState {
+                runs: vec![TimerRun {
+                    timer_name: "t".to_string(),
+                    started_at: chrono::Local::now() - chrono::Duration::seconds(started_secs_ago),
+                    repetitions: RepeatMode::Count(1),
+                    current_rep: 0,
+                    schedule_time: None,
+                    status: TimerStatus::Running,
+                    paused_at: None,
+                    elapsed_before_pause: chrono::Duration::zero(),
+                    fired_indices: Vec::new(),
+                    user_interrupt: false,
+                    interrupt_focus: None,
+                }],
+                registered: true,
+                last_saved_at: None,
+                interrupt_pending: None,
+                pending_interrupts: Vec::new(),
+                pending_fires: Vec::new(),
+                session_env: Default::default(),
+                close_windows_confirmed: false,
+            },
+        ))
+    }
+
+    /// Recovery must persist each missed alarm to the durable outbox
+    /// BEFORE handing it to the fire channel — a crash between recovery
+    /// and dispatch replays the alarm on the next boot instead of losing
+    /// it (the scheduler path already does this; recovery now matches).
+    #[tokio::test]
+    async fn recovery_persists_missed_events_to_outbox() {
+        let state = overdue_state(5, 10); // buzzer at 5s, run started 10s ago
+        let (tx, mut rx) = mpsc::channel(4);
+
+        recover_runs(Arc::clone(&state), &tx).await;
+
+        // The event reached the fire channel…
+        let received = rx.try_recv().expect("missed alarm was not sent");
+        assert_eq!(received.buzzer_name, "b");
+        assert_eq!(received.timer_name, "t");
+
+        // …and is durably recorded in the outbox at the same moment.
+        let pending = state.pending_fires().await;
+        assert_eq!(pending.len(), 1, "recovery must persist to the outbox");
+        assert_eq!(pending[0].buzzer_name, "b");
+
+        // The run's fired_indices advanced so the scheduler does not
+        // re-fire the same alarm after dispatch.
+        let run = state.get_run("t").await.unwrap();
+        assert_eq!(run.fired_indices, vec![0]);
     }
 }

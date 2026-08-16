@@ -52,6 +52,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Stop(args) => commands::control::stop(&args.name),
         Command::Stopall => commands::control::stop_all(),
         Command::ConfirmDestructive => commands::control::confirm_destructive(),
+        Command::RevokeDestructive => commands::control::revoke_destructive(),
         Command::Daemon { cmd } => commands::daemon::run(&cmd),
         Command::Examples { install } => {
             if install {

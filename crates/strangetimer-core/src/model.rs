@@ -207,6 +207,58 @@ impl FocusSpec {
     }
 }
 
+/// The interactive-session environment needed to launch GUI-side buzzer
+/// actions (video, URL, focus). Captured fresh by the CLI on every command
+/// and piggybacked onto each IPC request, so the daemon never relies on the
+/// (possibly stale) environment it was started with — a reboot, a new X
+/// login or a different terminal no longer breaks the openers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionEnv {
+    #[serde(default)]
+    pub display: Option<String>,
+    #[serde(default)]
+    pub wayland_display: Option<String>,
+    #[serde(default)]
+    pub xauthority: Option<String>,
+    #[serde(default)]
+    pub xdg_runtime_dir: Option<String>,
+    #[serde(default)]
+    pub dbus_session_bus_address: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl SessionEnv {
+    /// Capture the current process's session environment. Values are taken
+    /// only when present and non-empty, so a CLI running headless (SSH
+    /// without X forwarding) sends a partial snapshot instead of nothing.
+    pub fn from_process_env() -> SessionEnv {
+        SessionEnv {
+            display: env_opt("DISPLAY"),
+            wayland_display: env_opt("WAYLAND_DISPLAY"),
+            xauthority: env_opt("XAUTHORITY"),
+            xdg_runtime_dir: env_opt("XDG_RUNTIME_DIR"),
+            dbus_session_bus_address: env_opt("DBUS_SESSION_BUS_ADDRESS"),
+            path: env_opt("PATH"),
+        }
+    }
+
+    /// The snapshot is useful only when it carries at least one display
+    /// hint; a fully empty snapshot must not overwrite a stored one.
+    pub fn is_empty(&self) -> bool {
+        self.display.is_none()
+            && self.wayland_display.is_none()
+            && self.xauthority.is_none()
+            && self.xdg_runtime_dir.is_none()
+            && self.dbus_session_bus_address.is_none()
+            && self.path.is_none()
+    }
+}
+
+fn env_opt(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DaemonState {
     pub runs: Vec<TimerRun>,
@@ -216,6 +268,17 @@ pub struct DaemonState {
     /// recovery (Prompt 20) to reason about downtime; updated automatically
     /// inside `persistence::save_state`.
     pub last_saved_at: Option<DateTime<Local>>,
+    /// Latest known interactive-session environment, refreshed from every
+    /// CLI request and persisted so a daemon that restarts before any new
+    /// CLI contact still launches GUI buzzers against the last-known
+    /// session.
+    #[serde(default)]
+    pub session_env: SessionEnv,
+    /// Opt-in for the destructive `close_window` / `close_app` buzzers.
+    /// Persisted so the opt-in survives daemon restarts; revoked with
+    /// `strangetimer revoke-destructive`.
+    #[serde(default)]
+    pub close_windows_confirmed: bool,
     /// Legacy single-pending marker from the pre-multi-interrupt format.
     /// Kept so older state files still deserialize; folded into
     /// `pending_interrupts` on load.

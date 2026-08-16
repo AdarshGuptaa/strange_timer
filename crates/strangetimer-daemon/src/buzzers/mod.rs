@@ -14,15 +14,45 @@ use crate::state::AppState;
 
 /// Dispatch a single buzzer action. Multiple actions on one buzzer are fired
 /// sequentially by the caller (`fire_buzzer` in main.rs).
-pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
+///
+/// Returns a short outcome string when the action was blocked or failed
+/// (`None` on a clean fire). The caller surfaces it as a
+/// `BuzzerEvent::outcome` so `strangetimer watch` reports why an alarm did
+/// not run instead of letting failures vanish into `daemon.log`.
+///
+/// GUI-launching actions (video, URL, application, script) run under the
+/// latest-known interactive-session environment, so they never target a
+/// stale display from the daemon's own startup environment.
+pub async fn dispatch(state: &AppState, action: &BuzzerAction) -> Option<String> {
     match action {
-        BuzzerAction::DefaultAudio => audio::fire_audio(None),
-        BuzzerAction::Audio(path) => audio::fire_audio(path.as_deref()),
-        BuzzerAction::DefaultVideo => video::fire_video(None),
-        BuzzerAction::Video(path) => video::fire_video(path.as_deref()),
-        BuzzerAction::Application(path) => application::fire_application(path),
-        BuzzerAction::Url(url) => url::fire_url(url),
-        BuzzerAction::Bash(path) => bash::fire_bash(path),
+        BuzzerAction::DefaultAudio => {
+            audio::fire_audio(None);
+            None
+        }
+        BuzzerAction::Audio(path) => {
+            audio::fire_audio(path.as_deref());
+            None
+        }
+        BuzzerAction::DefaultVideo => {
+            let env = state.session_env_sync();
+            video::fire_video(None, &env)
+        }
+        BuzzerAction::Video(path) => {
+            let env = state.session_env_sync();
+            video::fire_video(path.as_deref(), &env)
+        }
+        BuzzerAction::Application(path) => {
+            let env = state.session_env_sync();
+            application::fire_application(path, &env)
+        }
+        BuzzerAction::Url(url) => {
+            let env = state.session_env_sync();
+            url::fire_url(url, &env)
+        }
+        BuzzerAction::Bash(path) => {
+            let env = state.session_env_sync();
+            bash::fire_bash(path, &env)
+        }
         BuzzerAction::CloseAllWindows => {
             // Deprecated (Prompt 48): closing the *entire* desktop is too
             // destructive. Refuse with a migration hint instead.
@@ -31,6 +61,10 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
                  will not run. Use `--close-window <id-or-title>` to close a \
                  selected window, or `--close-app <name>` to close an application."
             );
+            Some(
+                "blocked: close_windows is deprecated — use --close-window or --close-app"
+                    .to_string(),
+            )
         }
         BuzzerAction::CloseApplication(name) => {
             let confirmed = state.is_close_windows_confirmed().await;
@@ -40,9 +74,10 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
                      Run `strangetimer confirm-destructive` to enable it.",
                     name
                 );
-                return;
+                return Some("blocked: requires `strangetimer confirm-destructive`".to_string());
             }
             close_application::fire_close_application(name);
+            None
         }
         BuzzerAction::CloseWindow(target) => {
             let confirmed = state.is_close_windows_confirmed().await;
@@ -51,13 +86,18 @@ pub async fn dispatch(state: &AppState, action: &BuzzerAction) {
                     "WARNING: close_window buzzer will close {target:?}.\n\
                      Run `strangetimer confirm-destructive` to enable it."
                 );
-                return;
+                return Some("blocked: requires `strangetimer confirm-destructive`".to_string());
             }
             close_window::fire_close_window(target);
+            None
         }
-        BuzzerAction::FocusWindow(name) => focus_window::fire_focus_window(name),
+        BuzzerAction::FocusWindow(name) => {
+            focus_window::fire_focus_window(name);
+            None
+        }
         BuzzerAction::Llm { model, prompt } => {
             llm::fire_llm(model, prompt).await;
+            None
         }
     }
 }
@@ -93,7 +133,9 @@ pub async fn dispatch_interrupt(
                     .await;
                 });
             }
-            _ => dispatch(state, action).await,
+            _ => {
+                let _ = dispatch(state, action).await;
+            }
         }
     }
 

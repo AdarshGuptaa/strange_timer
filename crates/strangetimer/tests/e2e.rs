@@ -148,6 +148,21 @@ impl DaemonGuard {
             .expect("failed to run strangetimer CLI")
     }
 
+    /// Like [`cli`] but with extra environment overrides — simulates the
+    /// CLI running from a *different* terminal session (different DISPLAY,
+    /// XAUTHORITY, …) than the daemon was started in.
+    fn cli_with_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        let mut cmd = Command::new(cli_binary());
+        cmd.env("STRANGETIMER_DATA_DIR", &self.env.dir)
+            .env("STRANGETIMER_SOCKET", &self.env.socket);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        cmd.args(args)
+            .output()
+            .expect("failed to run strangetimer CLI")
+    }
+
     fn log_contents(&self) -> String {
         fs::read_to_string(&self.log).unwrap_or_default()
     }
@@ -1903,6 +1918,149 @@ fn url_buzzer_opens_target() {
     }
     let log = fs::read_to_string(&opens).unwrap_or_default();
     assert!(log.contains("https://example.com/alarm"), "{log}");
+}
+
+/// The daemon refreshes its launch environment from the CLI's latest
+/// request (protocol v2): a URL buzzer fires against the *new* session's
+/// DISPLAY even when the daemon was started from a different (stale) one —
+/// this is the fix for video/URL buzzers "randomly" failing after terminal
+/// switches and restarts.
+#[test]
+fn url_buzzer_uses_fresh_session_env() {
+    let env = TestEnv::new("env-refresh");
+    let opens = env.dir.join("opens.log");
+    // The mock opener records its args AND the DISPLAY it was launched with.
+    let extra = format!(
+        "printf 'DISPLAY=%s\\n' \"$DISPLAY\" >> \"{}\"",
+        opens.display()
+    );
+    let opener = recording_script(&opens, &extra);
+    let guard = DaemonGuard::start_with(
+        env,
+        &[
+            ("STRANGETIMER_TEST_OPENER", opener.to_str().unwrap()),
+            // Stale session baked into the daemon at start.
+            ("DISPLAY", ":0"),
+        ],
+    );
+
+    // Create the buzzer/timer and start the run from a *different* session.
+    for args in [
+        &[
+            "create",
+            "buzzer",
+            "web",
+            "--url",
+            "https://example.com/env",
+        ][..],
+        &["create", "timer", "u", "1s", "web"][..],
+        &["run", "u"][..],
+    ] {
+        let out = guard.cli_with_env(args, &[("DISPLAY", ":1")]);
+        assert!(
+            out.status.success(),
+            "`strangetimer {}` failed (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            out.status.code(),
+            stdout_text(&out),
+            stderr_text(&out),
+        );
+    }
+
+    // The opener must have run under the CLI's session env, not the
+    // daemon's stale :0.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = fs::read_to_string(&opens).unwrap_or_default();
+        if log.contains("https://example.com/env") && log.contains("DISPLAY=:1") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no fresh-env open:\n{log}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        !fs::read_to_string(&opens)
+            .unwrap_or_default()
+            .contains("DISPLAY=:0"),
+        "opener must not run under the stale daemon session"
+    );
+}
+
+/// `confirm-destructive` survives a daemon restart: a destructive buzzer
+/// that fired before the restart keeps firing after it, instead of being
+/// silently re-blocked (the in-memory-only flag used to reset every start).
+#[test]
+fn destructive_confirmation_survives_restart() {
+    let env = TestEnv::new("conf-restart");
+    let closes = env.dir.join("closes.log");
+    let wmctrl = recording_script(&closes, "");
+    let mut guard = DaemonGuard::start_with(
+        env,
+        &[
+            ("STRANGETIMER_TEST_WMCTRL", wmctrl.to_str().unwrap()),
+            // XDG_SESSION_TYPE="" tells the daemon this is an X11 session
+            // (this dev machine itself runs Wayland).
+            ("XDG_SESSION_TYPE", ""),
+        ],
+    );
+
+    expect_success(&guard, &["confirm-destructive"]);
+    expect_success(
+        &guard,
+        &["create", "buzzer", "win", "--close-window", "0x1234"],
+    );
+    expect_success(&guard, &["create", "timer", "c", "1s", "win"]);
+
+    // Restart the daemon (simulating a reboot / crash-restart cycle).
+    let env2 = guard.env.clone();
+    let log = guard.log.clone();
+    guard.child.kill().unwrap();
+    guard.child.wait().unwrap();
+    let log_file = open_log_append(&log);
+    guard.child = Command::new(daemon_binary())
+        .env("STRANGETIMER_DATA_DIR", &env2.dir)
+        .env("STRANGETIMER_SOCKET", &env2.socket)
+        .env("STRANGETIMER_TEST_WMCTRL", &wmctrl)
+        .env("XDG_SESSION_TYPE", "")
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .expect("failed to respawn strangetimer-daemon");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&env2.socket).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon did not restart");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // The close_window buzzer fires after the restart (opt-in persisted).
+    expect_success(&guard, &["run", "c"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = fs::read_to_string(&closes).unwrap_or_default();
+        if log.contains("0x1234") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "close_window did not fire after restart:\n{log}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // And revoke-destructive re-blocks it immediately.
+    expect_success(&guard, &["revoke-destructive"]);
+    expect_success(&guard, &["run", "c"]);
+    std::thread::sleep(Duration::from_secs(2));
+    let log = fs::read_to_string(&closes).unwrap_or_default();
+    // Each fire writes `-i`, `-c`, `0x1234`; count fires by target lines.
+    assert_eq!(
+        log.lines().filter(|l| *l == "0x1234").count(),
+        1,
+        "no close may fire after revoke:\n{log}"
+    );
 }
 
 /// An `--application` buzzer really launches the given program (a temp
